@@ -1,0 +1,35 @@
+[project]
+name = "manage-geocache-challenge-logs"
+version = "0.1.0"
+description = "A Flet app to find Write Note logs on Challenge Caches"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Flet developer", email = "you@example.com" }
+]
+dependencies = [
+  "flet==0.28.3",
+  "selenium>=4.20.0",
+  "webdriver-manager==4.0.2",
+  "python-dotenv>=1.0.0",
+]
+
+[tool.flet]
+org = "com.mycompany"
+product = "Manage Geocache Challenge Logs"
+company = "Flet"
+copyright = "Copyright (C) 2025"
+
+[tool.flet.app]
+path = "src"
+
+[tool.uv]
+dev-dependencies = [
+    "flet[all]==0.28.3",
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.group.dev.dependencies]
+flet = {extras = ["all"], version = "0.28.3"}
