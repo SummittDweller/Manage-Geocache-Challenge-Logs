@@ -195,6 +195,47 @@ by the app during:
 - .pager-next a
 - a[title='Next']
 
+## 9) Fully Automated Live Log Edit Targets
+
+### Live log URL guard
+- URL contains:
+  - /live/log/
+
+### Edit log entry point
+- Primary text target:
+  - span with exact text Edit log
+- Click fallback targets:
+  - closest ancestor a
+  - closest ancestor button
+
+### Log type dropdown (Write note -> Found it)
+- Dropdown/container candidates:
+  - #react-select-cache-log-type-input
+  - div[class*='control']
+  - [role='combobox']
+  - [aria-haspopup='true'][role='combobox']
+- Found it option targets:
+  - #log-type-2
+  - [id^='log-type-'] span containing Found it
+  - [data-testid='log-type-option'] span containing Found it
+  - [role='option'] containing Found it
+
+### Log textarea append target
+- textarea#gc-md-editor_md
+- textarea[name='textarea']
+- textarea[data-event-label='Cache Log - text entry']
+
+### Update log submit target
+- button[data-event-label='Cache Log - post']
+- button[data-testid='gc-button'] containing Update log
+- button.submit-button
+
+### Content append rule
+- Preserve current textarea content.
+- Move effective insertion to end.
+- Add one blank line.
+- Append the listing `checker_example_log` text.
+
 ## Notes
 
 - Selector usage is intentionally redundant to survive small layout changes.

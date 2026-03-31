@@ -30,6 +30,11 @@ and uses Selenium to drive a real Firefox browser session.
 - **Existing found-log short-circuit** – if the selected user already has a
   **Found It** log on a cache page, the app records that cache as
   `Write Note + Found It` and skips Project-GC checker execution.
+- **Fully Automated mode (preview)** – optional mode that opens a selected
+  `../live/log/...` page, clicks **Edit log**, switches log type from
+  **Write note** to **Found it**, appends checker text to the log body, clicks
+  **Update log**, then intentionally pauses with the browser left open for
+  guided/manual validation.
 - **CSV export** – writes results to
   `~/challenge_write_notes_YYYYMMDD_HHMMSS.csv` in your home directory.
   Columns now include checker outcome and generated example log text.
@@ -63,16 +68,29 @@ chmod +x run.sh
    Optionally check *Remember password* and/or paste a Firefox profile path.
 3. **Start** – click the **Start** button. Firefox will open and log you in
   automatically. Wait for the *"Logged in as …"* confirmation.
-4. **Scan** – click **Scan My Logs**.  The app will page through all your Write
+4. **Optional Fully Automated mode** – check
+  **Fully Automated - Change Write Note to Found** before running if you want
+  the app to attempt the live-log conversion flow.
+5. **Scan** – click **Scan My Logs**.  The app will page through all your Write
   Note logs, first checking each cache page for an existing Found It log from
   the specified user. If found, it records `Write Note + Found It` and moves
   on; otherwise it opens challenge checker pages and evaluates qualification
   state.
-5. **Results** – when the scan finishes, a summary is shown and a CSV file is
+6. **Results** – when the scan finishes, a summary is shown and a CSV file is
   saved to your home directory. Open the CSV with any spreadsheet application
    to review the results.
-6. **Log file** – detailed scan and startup logs are written to
+7. **Log file** – detailed scan and startup logs are written to
   `manage_geocache_challenge_logs.log` in the project root.
+
+### Fully Automated mode behavior
+
+- Uses the first eligible listing that has both a `log_url` and
+  `checker_example_log` content.
+- Navigates to the listing `log_url` and waits for a `/live/log/` page.
+- Clicks **Edit log**, selects **Found it**, appends checker text to the log
+  textarea, and clicks **Update log**.
+- Stops execution immediately after this flow and leaves the browser open so
+  you can inspect results and help refine logic.
 
 ---
 
@@ -165,6 +183,13 @@ During a running scan, an autosave file is also maintained at
 
 - Meaning: Transient network reset while loading checker/cache page.
 - Action: The app retries page open operations automatically. Re-run if needed.
+
+### `FULLY_AUTOMATED | ...`
+
+- Meaning: Preview automation mode for changing Write Note to Found it is
+  active and running live-log editor steps.
+- Action: Expect the run to pause intentionally with browser left open after
+  attempting the flow.
 
 ---
 
