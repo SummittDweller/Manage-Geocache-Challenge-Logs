@@ -68,6 +68,10 @@ def _get_stop_after_match_count():
 
 
 _DEBUG_STOP_AFTER_MATCH_COUNT = _get_stop_after_match_count()
+_DEBUG_STOP_AFTER_FILTER_APPLIED = (
+    os.getenv("GC_DEBUG_STOP_AFTER_FILTER_APPLIED", "false").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 
 def _get_app_logger():
@@ -472,7 +476,11 @@ def _normalize_geocaching_log_url(url):
         if not on_geocaching:
             return ""
 
-        # Prefer direct log endpoint; accept different query key variants.
+        # Newer geocaching UI log links: /live/log/GL...
+        if "/live/log/" in path:
+            return raw
+
+        # Classic log endpoints; accept different query key variants.
         if "/seek/log.aspx" in path:
             return raw
 
@@ -1547,6 +1555,9 @@ def scan_challenge_write_notes(driver, status_callback=None, progress_callback=N
     profile_api_error = getattr(driver, "_gc_profile_api_error", "")
 
     html_results = _scan_via_html(driver, update_status, update_progress)
+    if getattr(driver, "_debug_stop_after_filter_applied_triggered", False):
+        _log_message("SCAN | Debug stop after filter applied is active; skipping further processing")
+        return html_results
     if html_results:
         _log_message(f"SCAN | HTML-first scan returned {len(html_results)} results")
         return html_results
@@ -1775,6 +1786,16 @@ def _scan_via_html(driver, update_status, update_progress):
 
     update_progress(0.03, "Applying Write Note filter")
     _apply_write_note_filter(driver, update_status)
+
+    if _DEBUG_STOP_AFTER_FILTER_APPLIED:
+        driver._debug_stop_after_filter_applied_triggered = True
+        _log_message("HTML_SCAN | DEBUG_STOP | Stopping immediately after Write Note filter is applied")
+        update_progress(1.0, "Temporary stop after filter applied (debug)")
+        update_status(
+            "Temporary debug stop after Write Note filter applied. Browser left open on filtered logs page.",
+            ft.Colors.YELLOW,
+        )
+        return results
 
     while True:
         page_num += 1

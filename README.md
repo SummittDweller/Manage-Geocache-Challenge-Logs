@@ -30,6 +30,8 @@ and uses Selenium to drive a real Firefox browser session.
 - **CSV export** – writes results to
   `~/challenge_write_notes_YYYYMMDD_HHMMSS.csv` in your home directory.
   Columns now include checker outcome and generated example log text.
+- **Durable autosave** – writes an in-progress CSV after each processed result
+  row to reduce data loss if a scan is interrupted.
 - **Real-time progress** – progress bar, in-app status text, terminal output,
   and a persistent logfile update as the scan runs.
 
@@ -80,6 +82,7 @@ The app loads `.env` automatically at startup.
 | `REMEMBER_GEOCACHING_PASSWORD` | Optional app preference flag |
 | `GC_DEBUG_STOP_AFTER_MATCH_COUNT` | Debug stop threshold. `0` = no early stop (default), `N` = stop after `N` matched candidates and keep browser open |
 | `GC_DEBUG_STOP_AFTER_FIRST_LOG` | Legacy fallback. `true/1` = stop after 1, `false/0` = no early stop |
+| `GC_DEBUG_STOP_AFTER_FILTER_APPLIED` | Temporary selector-debug mode. `true/1` = stop immediately after Write Note filter is applied and leave browser open |
 
 ---
 
@@ -91,11 +94,14 @@ The app loads `.env` automatically at startup.
 | `gc_code` | Geocache GC code (e.g. `GC12345`) |
 | `cache_name` | Full name of the Challenge Cache |
 | `cache_url` | Direct link to the cache page on geocaching.com |
-| `log_url` | Direct link to your geocaching.com Write Note log entry (when detectable from the logs page) |
+| `log_url` | Direct link to your geocaching.com Write Note log entry (including modern `/live/log/GL...` links when detectable from the filtered logs page) |
 | `checker_status` | Checker outcome: `SUCCESS!` or `Failed` |
 | `checker_example_log` | Project-GC generated text suitable for copy/paste into a Found It log |
 
 Results are sorted by `log_date` descending (newest first).
+
+During a running scan, an autosave file is also maintained at
+`challenge_write_notes_in_progress.csv` in the project root.
 
 ---
 
@@ -143,6 +149,12 @@ Results are sorted by `log_date` descending (newest first).
   block for that entry.
 - Action: Use `cache_url` and/or checker URL for manual follow-up.
 
+### `DEBUG_STOP | Stopping immediately after Write Note filter is applied`
+
+- Meaning: Temporary filter-stop mode is enabled.
+- Action: Set `GC_DEBUG_STOP_AFTER_FILTER_APPLIED=false` in `.env` to resume
+  full processing.
+
 ### `CHECKER | ... connection reset by peer`
 
 - Meaning: Transient network reset while loading checker/cache page.
@@ -155,6 +167,14 @@ Results are sorted by `log_date` descending (newest first).
 - Python 3.10+
 - Firefox browser
 - See `python-requirements.txt` for Python package dependencies.
+
+---
+
+## HTML Target Reference
+
+See [HTML_TARGETS.md](HTML_TARGETS.md) for a consolidated list of selectors,
+tags, and URL patterns the app currently uses during scan, auth, and checker
+automation.
 
 ---
 
