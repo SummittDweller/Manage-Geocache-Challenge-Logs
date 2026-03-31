@@ -18,14 +18,20 @@ and uses Selenium to drive a real Firefox browser session.
 - **Optional Firefox profile** – paste the path to an existing Firefox profile
   so your extensions and saved cookies carry over (leave blank to use a fresh
   session).
-- **Full log scan** – iterates through every Write Note log in your account
-  using the geocaching.com internal JSON API, with an HTML-scraping fallback.
-- **Challenge Cache detection** – flags any cache whose name contains the word
-  *Challenge* (case-insensitive), which is the standard community convention.
+- **HTML-first full log scan** – scans the All Logs page in your authenticated
+  Firefox session and applies the Write Note filter; API fallback is used only
+  when profile/log APIs are available.
+- **Mystery Challenge detection** – keeps only Write Note entries where the
+  cache title contains *Challenge* and the cache appears to be a
+  mystery/puzzle/question-mark cache.
+- **Project-GC checker automation** – opens the checker from each challenge
+  cache page, handles Project-GC and geocaching OAuth consent flow, runs the
+  checker, and detects both success and failure outcomes.
 - **CSV export** – writes results to
   `~/challenge_write_notes_YYYYMMDD_HHMMSS.csv` in your home directory.
-  Columns: `log_date`, `gc_code`, `cache_name`, `cache_url`, `log_url`.
-- **Real-time progress** – progress bar and status text update as the scan runs.
+  Columns now include checker outcome and generated example log text.
+- **Real-time progress** – progress bar, in-app status text, terminal output,
+  and a persistent logfile update as the scan runs.
 
 ---
 
@@ -50,13 +56,30 @@ chmod +x run.sh
 1. **Launch** – run `./run.sh`.
 2. **Enter credentials** – type your geocaching.com username and password.
    Optionally check *Remember password* and/or paste a Firefox profile path.
-3. **Start** – click the **Start** button.  Firefox will open and log you in
-   automatically.  Wait for the *"Logged in as …"* confirmation.
+3. **Start** – click the **Start** button. Firefox will open and log you in
+  automatically. Wait for the *"Logged in as …"* confirmation.
 4. **Scan** – click **Scan My Logs**.  The app will page through all your Write
-   Note logs and highlight those on Challenge Caches.
+  Note logs, open challenge checker pages, and evaluate qualification state.
 5. **Results** – when the scan finishes, a summary is shown and a CSV file is
-   saved to your home directory.  Open the CSV with any spreadsheet application
+  saved to your home directory. Open the CSV with any spreadsheet application
    to review the results.
+6. **Log file** – detailed scan and startup logs are written to
+  `manage_geocache_challenge_logs.log` in the project root.
+
+---
+
+## Environment Variables
+
+The app loads `.env` automatically at startup.
+
+| Variable | Description |
+|--------|-------------|
+| `GEOCACHING_USERNAME` | Optional default username |
+| `GEOCACHING_PASSWORD` | Optional default password |
+| `FIREFOX_PROFILE_PATH` | Optional Firefox profile path |
+| `REMEMBER_GEOCACHING_PASSWORD` | Optional app preference flag |
+| `GC_DEBUG_STOP_AFTER_MATCH_COUNT` | Debug stop threshold. `0` = no early stop (default), `N` = stop after `N` matched candidates and keep browser open |
+| `GC_DEBUG_STOP_AFTER_FIRST_LOG` | Legacy fallback. `true/1` = stop after 1, `false/0` = no early stop |
 
 ---
 
@@ -68,9 +91,62 @@ chmod +x run.sh
 | `gc_code` | Geocache GC code (e.g. `GC12345`) |
 | `cache_name` | Full name of the Challenge Cache |
 | `cache_url` | Direct link to the cache page on geocaching.com |
-| `log_url` | Direct link to the individual log entry |
+| `log_url` | Direct link to your geocaching.com Write Note log entry (when detectable from the logs page) |
+| `checker_status` | Checker outcome: `SUCCESS!` or `Failed` |
+| `checker_example_log` | Project-GC generated text suitable for copy/paste into a Found It log |
 
 Results are sorted by `log_date` descending (newest first).
+
+---
+
+## Troubleshooting
+
+### `OAuth consent page found but Accept button was not clicked`
+
+- Meaning: The app reached geocaching OAuth consent but could not click the
+  consent control.
+- Action: Keep browser visible and confirm the button text (`Agree`, `Accept`,
+  etc.). Re-run and share the new `CHECKER` lines if it persists.
+
+### `Not on Project-GC host after auth flow: https://www.geocaching.com/oauth/...`
+
+- Meaning: OAuth redirect back to Project-GC did not complete yet (or failed).
+- Action: Wait briefly (redirect can take several seconds), or manually click
+  consent once. If persistent, capture the exact consent page HTML/button.
+
+### `Run checker button not found/clickable`
+
+- Meaning: Checker page loaded but the run control is not interactable.
+- Action: Verify you are on the challenge checker page and signed in. Re-run
+  with `GC_DEBUG_STOP_AFTER_MATCH_COUNT=1` to inspect the page state.
+
+### `Max execution time reached`
+
+- Meaning: Project-GC checker backend timed out for that run.
+- Action: The app retries once automatically. If it still fails, rerun later
+  (queue/load related) or run manually for that cache.
+
+### `Challenge check failure detected for ...`
+
+- Meaning: Checker result indicates you currently do not qualify.
+- Action: CSV `checker_status` will be `Failed` for that cache.
+
+### `Example log textarea found no content`
+
+- Meaning: Checker finished but generated example text was unavailable.
+- Action: Open checker page manually and verify `cc_ExampleLog` is populated.
+  Share the page variant if this happens repeatedly.
+
+### `log_url` is blank
+
+- Meaning: A geocaching Write Note link was not detectable in the logs page DOM
+  block for that entry.
+- Action: Use `cache_url` and/or checker URL for manual follow-up.
+
+### `CHECKER | ... connection reset by peer`
+
+- Meaning: Transient network reset while loading checker/cache page.
+- Action: The app retries page open operations automatically. Re-run if needed.
 
 ---
 

@@ -173,7 +173,7 @@ def main(page: ft.Page):
 
         # Update loading status
         loading_status_ref.current.value = (
-            f"Logged in as {driver._gc_active_user}. Ready to scan."
+            f"Logged in as {driver._gc_active_user}. Ready to scan. Log: {fn.get_log_file_path()}"
         )
         loading_status_ref.current.color = ft.Colors.GREEN
         progress_bar_ref.current.visible = False
@@ -235,9 +235,15 @@ def main(page: ft.Page):
         )
         page.add(status_text)
 
+        scan_launch_state = {"started": False}
+
         # ---- Scan button ----------------------------------------------------
         def on_scan_click(e):
             import threading
+
+            if scan_launch_state["started"]:
+                return
+            scan_launch_state["started"] = True
 
             scan_button_ref.current.disabled = True
             scan_button_ref.current.update()
@@ -259,16 +265,33 @@ def main(page: ft.Page):
                 scan_progress_label.update()
 
             def run_scan():
-                scan_results = fn.scan_challenge_write_notes(
-                    driver,
-                    status_callback=update_scan_status,
-                    progress_callback=update_scan_progress,
+                update_scan_status(
+                    f"Scan started. Writing detailed logs to {fn.get_log_file_path()}",
+                    ft.Colors.YELLOW,
                 )
+                try:
+                    scan_results = fn.scan_challenge_write_notes(
+                        driver,
+                        status_callback=update_scan_status,
+                        progress_callback=update_scan_progress,
+                    )
+                except Exception as exc:
+                    fn._log_exception("SCAN_THREAD", exc)
+                    status_text_ref.current.value = f"Scan failed: {exc}"
+                    status_text_ref.current.color = ft.Colors.RED
+                    status_text_ref.current.update()
+                    scan_button_ref.current.disabled = False
+                    scan_button_ref.current.update()
+                    scan_progress_bar.visible = False
+                    scan_progress_bar.update()
+                    scan_progress_label.value = ""
+                    scan_progress_label.update()
+                    return
 
                 count = len(scan_results)
                 results_text_ref.current.value = (
                     f"Found {count} Write Note log{'s' if count != 1 else ''} "
-                    f"on Challenge Cache{'s' if count != 1 else ''}."
+                    f"on mystery Challenge Cache{'s' if count != 1 else ''}."
                 )
                 results_text_ref.current.color = (
                     ft.Colors.GREEN if count > 0 else ft.Colors.GREY_400
@@ -276,7 +299,10 @@ def main(page: ft.Page):
                 results_text_ref.current.update()
 
                 if scan_results:
-                    success, msg, csv_path = fn.export_to_csv(scan_results)
+                    success, msg, csv_path = fn.export_to_csv(
+                        scan_results,
+                        status_callback=update_scan_status,
+                    )
                     csv_status_ref.current.value = msg
                     csv_status_ref.current.color = (
                         ft.Colors.GREEN if success else ft.Colors.RED
@@ -299,6 +325,20 @@ def main(page: ft.Page):
             on_click=on_scan_click,
         )
         page.add(scan_button)
+
+        status_text_ref.current.value = "Auto-starting scan in 5 seconds..."
+        status_text_ref.current.color = ft.Colors.GREY_400
+        status_text_ref.current.update()
+
+        def auto_start_scan():
+            import time
+
+            time.sleep(5)
+            if not scan_launch_state["started"]:
+                on_scan_click(None)
+
+        import threading
+        threading.Thread(target=auto_start_scan, daemon=True).start()
 
     start_button.on_click = on_start_click
     page.add(start_button)
