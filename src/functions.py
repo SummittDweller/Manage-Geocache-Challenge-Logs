@@ -473,12 +473,13 @@ def _normalize_geocaching_log_url(url):
             return ""
 
         # Prefer direct log endpoint; accept different query key variants.
-        if "/seek/log.aspx" in path and query:
+        if "/seek/log.aspx" in path:
             return raw
 
         # Accept alternative casing/shape for log endpoint and normalize domain.
-        if "/log.aspx" in path and query:
-            return f"https://www.geocaching.com{parsed.path}?{parsed.query}"
+        if "/log.aspx" in path:
+            suffix = f"?{parsed.query}" if parsed.query else ""
+            return f"https://www.geocaching.com{parsed.path}{suffix}"
     except Exception:
         return ""
 
@@ -509,6 +510,60 @@ def _write_in_progress_csv(rows):
                 writer.writerow({k: row.get(k, "") for k in fieldnames})
     except Exception as exc:
         _log_message(f"SCAN | Could not write in-progress CSV: {exc}", "warning")
+
+
+def _extract_visit_log_links_by_gc_code(driver):
+        """Build {GC_CODE: geocaching log URL} map from current logs page."""
+        script = r"""
+const root = document.querySelector('main') || document.body;
+const gcRegex = /\/geocache\/(GC[A-Z0-9]+)|[?&]wp=(GC[A-Z0-9]+)/i;
+const visitAnchors = Array.from(root.querySelectorAll('a[href]')).filter((a) => {
+    const txt = (a.textContent || '').trim().toLowerCase();
+    const href = (a.getAttribute('href') || '').toLowerCase();
+    return txt.includes('visit log') || href.includes('/seek/log.aspx') || href.includes('log.aspx?luid');
+});
+
+const out = {};
+for (const a of visitAnchors) {
+    const logHref = a.href || a.getAttribute('href') || '';
+    if (!logHref) continue;
+
+    let node = a;
+    let gcCode = '';
+    for (let depth = 0; depth < 14 && node; depth += 1) {
+        const geocacheLink = node.querySelector('a[href*="/geocache/"], a[href*="wp=GC" i]');
+        if (geocacheLink) {
+            const targetHref = geocacheLink.href || geocacheLink.getAttribute('href') || '';
+            const match = targetHref.match(gcRegex);
+            gcCode = ((match && (match[1] || match[2])) || '').toUpperCase();
+            if (gcCode) break;
+        }
+        node = node.parentElement;
+    }
+
+    if (!gcCode) continue;
+    if (!(gcCode in out)) {
+        out[gcCode] = logHref;
+    }
+}
+
+return out;
+"""
+        try:
+                value = driver.execute_script(script) or {}
+        except Exception:
+                return {}
+
+        if not isinstance(value, dict):
+                return {}
+
+        cleaned = {}
+        for gc_code, url in value.items():
+                code = (gc_code or "").strip().upper()
+                log_url = _normalize_geocaching_log_url(url)
+                if code and log_url:
+                        cleaned[code] = log_url
+        return cleaned
 
 
 def _apply_write_note_filter(driver, update_status):
@@ -1759,6 +1814,11 @@ def _scan_via_html(driver, update_status, update_progress):
             )
             break
 
+        visit_log_map = _extract_visit_log_links_by_gc_code(driver)
+        _log_message(
+            f"HTML_SCAN | Page {page_num} | Visit log links mapped: {len(visit_log_map)}"
+        )
+
         page_checked = 0
         page_matches = 0
 
@@ -1792,6 +1852,8 @@ def _scan_via_html(driver, update_status, update_progress):
                 geocaching_log_url = _normalize_geocaching_log_url(
                     candidate.get("visitLogHref") or candidate.get("logHref") or ""
                 )
+                if not geocaching_log_url:
+                    geocaching_log_url = visit_log_map.get(gc_code, "")
 
                 if _is_target_challenge_cache(cache_name, entry_text, metadata):
                     row = {
