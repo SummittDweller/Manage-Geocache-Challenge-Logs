@@ -114,6 +114,23 @@ def _log_exception(context, exc):
     _get_app_logger().error(traceback.format_exc())
 
 
+def _is_firefox_profile_locked(profile_path):
+    """Return True when lock artifacts suggest the profile is currently in use."""
+    if not profile_path:
+        return False
+
+    lock_candidates = [
+        "parent.lock",
+        ".parentlock",
+        "lock",
+        "SingletonLock",
+    ]
+    for lock_name in lock_candidates:
+        if Path(profile_path, lock_name).exists():
+            return True
+    return False
+
+
 def _read_json_body(driver):
     """Read and parse JSON currently rendered in the page body."""
     body = driver.find_element(By.TAG_NAME, "body").text
@@ -1291,6 +1308,74 @@ return (el.value || el.textContent || el.innerText || '').trim();
     return ""
 
 
+def _cache_has_user_found_it_log(driver, username):
+        """Return True when the cache page shows a Found It log from the specified user."""
+        target_user = (username or "").strip().lower()
+        if not target_user:
+                return False
+
+        script = r"""
+const normalize = (v) => String(v || '').trim().toLowerCase();
+const target = normalize(arguments[0]);
+if (!target) return false;
+
+const FOUND_MARKERS = [
+    'found it',
+    'found this geocache',
+    'log type: found it',
+    'logtype-2',
+    'log-type-2',
+    'wpttypes/2',
+    '/2.',
+    'smile',
+];
+
+const hasFoundMarker = (node) => {
+    if (!node) return false;
+    const text = normalize(node.textContent || '');
+    if (FOUND_MARKERS.some((m) => text.includes(m))) return true;
+
+    const attrs = [];
+    for (const el of Array.from(node.querySelectorAll('img,svg,use,span,i,div,tr,li,article'))) {
+        attrs.push(
+            normalize(el.getAttribute && el.getAttribute('alt')),
+            normalize(el.getAttribute && el.getAttribute('title')),
+            normalize(el.getAttribute && el.getAttribute('class')),
+            normalize(el.getAttribute && el.getAttribute('src')),
+            normalize(el.getAttribute && el.getAttribute('data-logtype')),
+            normalize(el.getAttribute && el.getAttribute('data-log-type')),
+            normalize(el.getAttribute && el.getAttribute('aria-label')),
+        );
+    }
+    return attrs.some((value) => value && FOUND_MARKERS.some((m) => value.includes(m)));
+};
+
+const userLinks = Array.from(document.querySelectorAll('a[href], span, div, td, li')).filter((node) => {
+    const text = normalize(node.textContent || '');
+    if (!text) return false;
+    if (text !== target && !text.includes(target)) return false;
+    return true;
+});
+
+for (const node of userLinks) {
+    let current = node;
+    for (let depth = 0; depth < 12 && current; depth += 1) {
+        if (hasFoundMarker(current)) {
+            return true;
+        }
+        current = current.parentElement;
+    }
+}
+
+return false;
+"""
+
+        try:
+                return bool(driver.execute_script(script, target_user))
+        except Exception:
+                return False
+
+
 def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_checker_tab_open=False):
     """Open checker page and return checker URL plus generated Project-GC example log text."""
     checker_url = ""
@@ -1326,6 +1411,23 @@ def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_c
         temp_opened = True
         _safe_get(cache_url, "Open cache page")
         time.sleep(1.5)
+
+        active_user = (getattr(driver, "_gc_username", "") or "").strip()
+        if not active_user:
+            fallback_user = (getattr(driver, "_gc_active_user", "") or "").strip()
+            if fallback_user and fallback_user.lower() != "existing session":
+                active_user = fallback_user
+
+        if active_user and _cache_has_user_found_it_log(driver, active_user):
+            checker_status = "Write Note + Found It"
+            checker_example_log = (
+                f"User '{active_user}' already has a Found It log on this cache."
+            )
+            checker_url = cache_url
+            _log_message(
+                f"CHECKER | Found existing Found It log for {active_user} on {cache_name}; skipping checker"
+            )
+            return checker_url, checker_example_log, checker_status
 
         checker_href = _find_project_gc_checker_href(driver)
         if not checker_href:
@@ -1453,12 +1555,28 @@ def initialize_driver(page, username=None, password=None):
     if not profile_path:
         profile_path = (page.client_storage.get("firefox_profile_path") or "").strip()
 
-    if profile_path and os.path.isdir(profile_path):
+    should_use_profile = profile_path and os.path.isdir(profile_path)
+    if should_use_profile and _is_firefox_profile_locked(profile_path):
+        _log_message(
+            "STARTUP | Firefox profile appears to be in use (lock file detected). "
+            "Falling back to a fresh session.",
+            "warning",
+        )
+        should_use_profile = False
+
+    if should_use_profile:
         options.add_argument("-profile")
         options.add_argument(profile_path)
         _log_message(f"STARTUP | Using Firefox profile: {profile_path}")
     else:
-        _log_message("STARTUP | No Firefox profile supplied; using a fresh session")
+        if profile_path and not os.path.isdir(profile_path):
+            _log_message(
+                f"STARTUP | Firefox profile path not found: {profile_path}. "
+                "Using a fresh session.",
+                "warning",
+            )
+        else:
+            _log_message("STARTUP | Using a fresh Firefox session")
 
     update_loading("Launching Firefox...", 0.10)
 
@@ -1962,6 +2080,265 @@ def _scan_via_html(driver, update_status, update_progress):
         ft.Colors.GREEN,
     )
     return results
+
+
+def prepare_write_note_edit_log_page(driver, scan_results, status_callback=None):
+    """Run the first-pass Write Note -> Found It automation on a listing log page."""
+    def update_status(msg, color=None):
+        if status_callback:
+            status_callback(msg, color)
+        _log_message(f"AUTOMATION | {msg}")
+
+    if not scan_results:
+        return False, "No scan results available for Fully Automated mode."
+
+    target_row = None
+    for row in scan_results:
+        candidate_url = _normalize_geocaching_log_url(row.get("log_url") or "")
+        checker_text = (row.get("checker_example_log") or "").strip()
+        if candidate_url and checker_text:
+            target_row = row
+            break
+
+    # Fallback to first valid log URL even if checker text is empty.
+    if not target_row:
+        for row in scan_results:
+            candidate_url = _normalize_geocaching_log_url(row.get("log_url") or "")
+            if candidate_url:
+                target_row = row
+                break
+
+    if not target_row:
+        return False, "No valid listing log URL found in scan results."
+
+    log_url = _normalize_geocaching_log_url(target_row.get("log_url") or "")
+    checker_example_log = (target_row.get("checker_example_log") or "").strip()
+    cache_label = (target_row.get("gc_code") or "").strip() or (target_row.get("cache_name") or "cache")
+
+    try:
+        update_status(f"Fully Automated: opening listing log page for {cache_label}...")
+        driver.get(log_url)
+    except Exception as exc:
+        return False, f"Could not open listing log URL: {exc}"
+
+    # /seek/log.aspx links typically redirect to /live/log/GL... in the modern UI.
+    reached_live_log = False
+    end_time = time.time() + 20
+    while time.time() < end_time:
+        current = (driver.current_url or "").lower()
+        if "/live/log/" in current:
+            reached_live_log = True
+            break
+        time.sleep(0.25)
+
+    if not reached_live_log:
+        return (
+            False,
+            f"Opened listing URL but did not reach a /live/log/ page (current: {driver.current_url}).",
+        )
+
+    update_status("Fully Automated: live log page loaded; locating Edit log link...")
+
+    selectors = [
+                _log_message(
+                    f"AUTOMATION | Clicked Edit log for {cache_label} on {driver.current_url}"
+                )
+                break
+    for selector in selectors:
+        try:
+        else:
+            continue
+        break
+    else:
+        try:
+            clicked = bool(
+                driver.execute_script(
+                    """
+const spans = Array.from(document.querySelectorAll('span'));
+for (const span of spans) {
+  const text = (span.textContent || '').trim().toLowerCase();
+  if (text !== 'edit log') continue;
+  const clickable = span.closest('a,button');
+  if (!clickable) continue;
+  clickable.scrollIntoView({block: 'center'});
+  clickable.click();
+  return true;
+}
+return false;
+"""
+                )
+            )
+            if clicked:
+                _log_message(
+                    f"AUTOMATION | Clicked Edit log via JavaScript fallback for {cache_label}"
+                )
+            else:
+                return False, "Edit log link was not found on the live log page."
+        except Exception:
+            return False, "Edit log link was not found on the live log page."
+            spans = WebDriverWait(driver, 8).until(
+    update_status("Fully Automated: selecting Found It log type...")
+
+    found_type_selected = False
+    try:
+        combo_input = WebDriverWait(driver, 12).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#react-select-cache-log-type-input"))
+        )
+        driver.execute_script("arguments[0].click();", combo_input)
+        time.sleep(0.4)
+
+        option_locators = [
+            (By.XPATH, "//*[contains(@class,'log-type-option') and normalize-space(.)='Found it']"),
+            (By.XPATH, "//span[translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='found it']"),
+            (By.XPATH, "//*[@data-testid='log-type-option' and contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'found it')]"),
+        ]
+        for by, locator in option_locators:
+            try:
+                option = WebDriverWait(driver, 4).until(
+                    EC.element_to_be_clickable((by, locator))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                driver.execute_script("arguments[0].click();", option)
+                found_type_selected = True
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not found_type_selected:
+        try:
+            found_type_selected = bool(
+                driver.execute_script(
+                    """
+const input = document.querySelector('#react-select-cache-log-type-input');
+if (input) {
+  input.click();
+}
+const candidates = Array.from(document.querySelectorAll('[data-testid="log-type-option"], .log-type-option, [role="option"], span'));
+for (const el of candidates) {
+  const text = (el.textContent || '').trim().toLowerCase();
+  if (text !== 'found it') continue;
+  const clickable = el.closest('[data-testid="log-type-option"], [role="option"], button, div, li, a') || el;
+  clickable.scrollIntoView({block: 'center'});
+  clickable.click();
+  return true;
+}
+return false;
+"""
+                )
+            )
+        except Exception:
+            found_type_selected = False
+
+    if not found_type_selected:
+        return False, "Could not find/select the Found it option in the log-type dropdown."
+
+    update_status("Fully Automated: appending checker example text to log body...")
+
+    if not checker_example_log:
+        return False, "checker_example_log is empty for the selected listing; cannot append text."
+
+    try:
+        textarea = WebDriverWait(driver, 12).until(
+            EC.presence_of_element_located(
+                (
+                    By.CSS_SELECTOR,
+                    "#gc-md-editor_md, textarea#gc-md-editor_md, textarea[data-event-label='Cache Log - text entry']",
+                )
+            )
+        )
+    except Exception:
+        return False, "Could not locate the cache log textarea."
+
+    try:
+        existing_text = textarea.get_attribute("value") or ""
+        if existing_text.strip():
+            combined_text = f"{existing_text.rstrip()}\n\n{checker_example_log}"
+        else:
+            combined_text = checker_example_log
+
+        driver.execute_script(
+            """
+const textarea = arguments[0];
+const text = arguments[1];
+textarea.focus();
+textarea.value = text;
+textarea.dispatchEvent(new Event('input', { bubbles: true }));
+textarea.dispatchEvent(new Event('change', { bubbles: true }));
+""",
+            textarea,
+            combined_text,
+        )
+    except Exception as exc:
+        return False, f"Failed to append checker_example_log text: {exc}"
+
+    update_status("Fully Automated: clicking Update log...")
+
+    clicked_update = False
+    update_locators = [
+        (By.XPATH, "//button[normalize-space(.)='Update log']"),
+        (By.CSS_SELECTOR, "button[data-event-label='Cache Log - post']"),
+        (By.CSS_SELECTOR, "button.gc-button-primary.submit-button"),
+    ]
+    for by, locator in update_locators:
+        try:
+            update_btn = WebDriverWait(driver, 8).until(
+                EC.element_to_be_clickable((by, locator))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", update_btn)
+            driver.execute_script("arguments[0].click();", update_btn)
+            clicked_update = True
+            break
+        except Exception:
+            continue
+
+    if not clicked_update:
+        try:
+            clicked_update = bool(
+                driver.execute_script(
+                    """
+const buttons = Array.from(document.querySelectorAll('button'));
+for (const btn of buttons) {
+  const text = (btn.textContent || '').trim().toLowerCase();
+  if (text !== 'update log') continue;
+  btn.scrollIntoView({block: 'center'});
+  btn.click();
+  return true;
+}
+return false;
+"""
+                )
+            )
+        except Exception:
+            clicked_update = False
+
+    if not clicked_update:
+        return False, "Could not find/click the Update log button."
+
+    _log_message(
+        f"AUTOMATION | Updated log for {cache_label} by selecting Found it and appending checker text"
+    )
+    return True, "Updated log by selecting Found it and appending checker example text."
+  const clickable = span.closest('a,button');
+  if (!clickable) continue;
+  clickable.scrollIntoView({block: 'center'});
+  clickable.click();
+  return true;
+}
+return false;
+"""
+            )
+        )
+        if clicked:
+            _log_message(
+                f"AUTOMATION | Clicked Edit log via JavaScript fallback for {cache_label}"
+            )
+            return True, "Clicked Edit log on live log page; browser left open for next-step logic."
+    except Exception:
+        pass
+
+    return False, "Edit log link was not found on the live log page."
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import flet as ft
+import os
 import functions as fn
 from app_refs import (
     firefox_profile_path_ref,
@@ -16,6 +17,12 @@ from app_refs import (
 # Main function to run the Flet app
 # --------------------------------------------------------------------------------
 def main(page: ft.Page):
+
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = (os.getenv(name, "") or "").strip().lower()
+        if not raw:
+            return default
+        return raw in {"1", "true", "yes", "on"}
 
     # Setup the Flet page
     page.title = "Manage Geocache Challenge Logs"
@@ -44,17 +51,61 @@ def main(page: ft.Page):
         )
     )
 
-    # Load persisted values
-    stored_username = page.client_storage.get("geocaching_username") or ""
-    stored_remember_password = bool(
+    # Load persisted values, then optionally let .env values take precedence.
+    persisted_username = page.client_storage.get("geocaching_username") or ""
+    persisted_remember_password = bool(
         page.client_storage.get("remember_geocaching_password")
     )
-    stored_password = (
+    persisted_password = (
         page.client_storage.get("geocaching_password") or ""
-        if stored_remember_password
+        if persisted_remember_password
         else ""
     )
-    stored_profile_path = page.client_storage.get("firefox_profile_path") or ""
+    persisted_profile_path = page.client_storage.get("firefox_profile_path") or ""
+
+    env_username_set = os.environ.get("GEOCACHING_USERNAME") is not None
+    env_password_set = os.environ.get("GEOCACHING_PASSWORD") is not None
+    env_profile_path_set = os.environ.get("FIREFOX_PROFILE_PATH") is not None
+
+    env_username = (os.getenv("GEOCACHING_USERNAME") or "").strip()
+    env_password = os.getenv("GEOCACHING_PASSWORD") or ""
+    env_profile_path = (os.getenv("FIREFOX_PROFILE_PATH") or "").strip()
+    env_remember_set = (os.getenv("REMEMBER_GEOCACHING_PASSWORD", "") or "").strip() != ""
+    env_remember_password = _env_bool("REMEMBER_GEOCACHING_PASSWORD", default=False)
+
+    # Default behavior: if .env provides credentials, use them to prefill fields.
+    prefer_env_defaults = _env_bool("GC_PREFER_ENV_CREDENTIALS", default=True)
+
+    if prefer_env_defaults:
+        stored_username = env_username if env_username_set else persisted_username
+        stored_password = env_password if env_password_set else persisted_password
+        stored_profile_path = (
+            env_profile_path if env_profile_path_set else persisted_profile_path
+        )
+    else:
+        stored_username = persisted_username or env_username
+        stored_password = persisted_password or env_password
+        stored_profile_path = persisted_profile_path or env_profile_path
+
+    if env_remember_set:
+        stored_remember_password = env_remember_password
+    else:
+        stored_remember_password = persisted_remember_password
+
+    if prefer_env_defaults:
+        username_source = (
+            "env" if env_username_set else ("saved storage" if persisted_username else "none")
+        )
+        password_source = (
+            "env" if env_password_set else ("saved storage" if persisted_password else "none")
+        )
+    else:
+        username_source = (
+            "saved storage" if persisted_username else ("env" if env_username_set else "none")
+        )
+        password_source = (
+            "saved storage" if persisted_password else ("env" if env_password_set else "none")
+        )
 
     # ---- Helper: enable/disable Start button --------------------------------
     def _update_start_button_state():
@@ -117,6 +168,15 @@ def main(page: ft.Page):
     )
     page.add(remember_checkbox)
 
+    fully_automated_checkbox = ft.Checkbox(
+        label="Fully Automated - Change Write Note to Found",
+        value=bool(page.client_storage.get("fully_automated_change_to_found") or False),
+        on_change=lambda e: page.client_storage.set(
+            "fully_automated_change_to_found", bool(e.control.value)
+        ),
+    )
+    page.add(fully_automated_checkbox)
+
     # Optional Firefox profile path
     profile_field = ft.TextField(
         label="Firefox profile folder (optional – paste full path or leave blank)",
@@ -138,6 +198,14 @@ def main(page: ft.Page):
 
     def on_start_click(e):
         page.clean()
+
+        fully_automated_mode = bool(fully_automated_checkbox.value)
+
+        fn._log_message(
+            "STARTUP | Credential source: "
+            f"username={username_source}, password={password_source}, "
+            f"prefer_env={prefer_env_defaults}"
+        )
 
         # Loading status
         loading_status = ft.Text(
@@ -309,12 +377,34 @@ def main(page: ft.Page):
                     )
                     csv_status_ref.current.update()
 
+                if fully_automated_mode:
+                    prepared, prep_msg = fn.prepare_write_note_edit_log_page(
+                        driver,
+                        scan_results,
+                        status_callback=update_scan_status,
+                    )
+                    update_scan_status(
+                        (
+                            "Fully Automated mode enabled. "
+                            f"{prep_msg} "
+                            "Execution paused with browser intentionally left open for review/next-step logic."
+                        ),
+                        ft.Colors.GREEN if prepared else ft.Colors.YELLOW,
+                    )
+                    # fn.change_write_note_to_found(driver, scan_results)
+                    return
+
                 scan_button_ref.current.disabled = False
                 scan_button_ref.current.update()
                 scan_progress_bar.visible = False
                 scan_progress_bar.update()
                 scan_progress_label.value = ""
                 scan_progress_label.update()
+                status_text_ref.current.value = (
+                    "Run complete. Please shut down the app using the red button at the top of the window."
+                )
+                status_text_ref.current.color = ft.Colors.YELLOW
+                status_text_ref.current.update()
 
             thread = threading.Thread(target=run_scan, daemon=True)
             thread.start()

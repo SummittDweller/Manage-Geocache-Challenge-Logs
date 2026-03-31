@@ -82,6 +82,17 @@ by the app during:
 
 ## 3) Cache Page -> Project-GC Checker Link
 
+### Existing Found It detection (pre-checker)
+- Purpose:
+  - if the specified geocaching user already has a Found It log on the cache
+    page, record `Write Note + Found It` and skip checker execution.
+- Text signals used in cache-page content:
+  - found it
+  - type: found it
+  - log type: found it
+- User-match requirement:
+  - the log block must also include the active username (case-insensitive).
+
 ### Checker image/link targets
 - a img[title*='Project-GC Challenge checker']
 - a img[alt*='PGC Checker']

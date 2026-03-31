@@ -27,6 +27,9 @@ and uses Selenium to drive a real Firefox browser session.
 - **Project-GC checker automation** – opens the checker from each challenge
   cache page, handles Project-GC and geocaching OAuth consent flow, runs the
   checker, and detects both success and failure outcomes.
+- **Existing found-log short-circuit** – if the selected user already has a
+  **Found It** log on a cache page, the app records that cache as
+  `Write Note + Found It` and skips Project-GC checker execution.
 - **CSV export** – writes results to
   `~/challenge_write_notes_YYYYMMDD_HHMMSS.csv` in your home directory.
   Columns now include checker outcome and generated example log text.
@@ -61,7 +64,10 @@ chmod +x run.sh
 3. **Start** – click the **Start** button. Firefox will open and log you in
   automatically. Wait for the *"Logged in as …"* confirmation.
 4. **Scan** – click **Scan My Logs**.  The app will page through all your Write
-  Note logs, open challenge checker pages, and evaluate qualification state.
+  Note logs, first checking each cache page for an existing Found It log from
+  the specified user. If found, it records `Write Note + Found It` and moves
+  on; otherwise it opens challenge checker pages and evaluates qualification
+  state.
 5. **Results** – when the scan finishes, a summary is shown and a CSV file is
   saved to your home directory. Open the CSV with any spreadsheet application
    to review the results.
@@ -95,7 +101,7 @@ The app loads `.env` automatically at startup.
 | `cache_name` | Full name of the Challenge Cache |
 | `cache_url` | Direct link to the cache page on geocaching.com |
 | `log_url` | Direct link to your geocaching.com Write Note log entry (including modern `/live/log/GL...` links when detectable from the filtered logs page) |
-| `checker_status` | Checker outcome: `SUCCESS!` or `Failed` |
+| `checker_status` | Outcome: `SUCCESS!`, `Failed`, or `Write Note + Found It` |
 | `checker_example_log` | Project-GC generated text suitable for copy/paste into a Found It log |
 
 Results are sorted by `log_date` descending (newest first).
