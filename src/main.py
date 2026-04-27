@@ -305,6 +305,30 @@ def main(page: ft.Page):
 
         scan_launch_state = {"started": False}
 
+        def _build_checker_summary(scan_results):
+            total_checked = len(scan_results or [])
+            statuses = [str((row or {}).get("checker_status") or "").strip() for row in (scan_results or [])]
+
+            found_it_already = sum(1 for status in statuses if status == "Write Note + Found It")
+            no_checker = sum(1 for status in statuses if status == "No automated checker available")
+            failed_validation = sum(
+                1 for status in statuses if status == "Checker indicates challenge not fulfilled"
+            )
+            passed_validation = sum(
+                1
+                for status in statuses
+                if status in {"SUCCESS!", "Checker succeeded (no example log)"}
+            )
+
+            return (
+                "Summary:\n"
+                f"Listings checked: {total_checked}\n"
+                f"Already Found It logs: {found_it_already}\n"
+                f"No automated checker: {no_checker}\n"
+                f"Checker failed validation: {failed_validation}\n"
+                f"Checker PASSED! validation: {passed_validation}"
+            )
+
         # ---- Scan button ----------------------------------------------------
         def on_scan_click(e):
             import threading
@@ -371,10 +395,15 @@ def main(page: ft.Page):
                         scan_results,
                         status_callback=update_scan_status,
                     )
-                    csv_status_ref.current.value = msg
+                    summary = _build_checker_summary(scan_results)
+                    csv_status_ref.current.value = f"{msg}\n\n{summary}"
                     csv_status_ref.current.color = (
                         ft.Colors.GREEN if success else ft.Colors.RED
                     )
+                    csv_status_ref.current.update()
+                else:
+                    csv_status_ref.current.value = _build_checker_summary(scan_results)
+                    csv_status_ref.current.color = ft.Colors.GREY_400
                     csv_status_ref.current.update()
 
                 if fully_automated_mode:

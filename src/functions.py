@@ -198,7 +198,7 @@ def _is_target_challenge_cache(cache_name, *details):
 
 def _extract_html_log_candidates(driver, require_write_note=True):
     """Extract likely Write Note log containers from the All Logs page."""
-    script = """
+    script = r"""
 const root = document.querySelector('main') || document.body;
 const hrefRegex = /\/geocache\/(GC[A-Z0-9]+)|[?&]wp=(GC[A-Z0-9]+)|cache_details\.aspx\?wp=(GC[A-Z0-9]+)/i;
 const requireWriteNote = Boolean(arguments[0]);
@@ -370,8 +370,8 @@ return results;
 
 
 def _extract_filtered_challenge_candidates(driver):
-        """Extract challenge unknown-cache candidates from filtered logs page."""
-        script = """
+    """Extract challenge unknown-cache candidates from filtered logs page."""
+    script = r"""
 const root = document.querySelector('main') || document.body;
 const gcRegex = /\/geocache\/(GC[A-Z0-9]+)/i;
 const imageLinks = Array.from(root.querySelectorAll('a.ImageLink[href*="/geocache/"]'));
@@ -466,15 +466,15 @@ for (const imgLink of imageLinks) {
 
 return results;
 """
-        try:
-                candidates = driver.execute_script(script) or []
-        except Exception:
-                return []
+    try:
+        candidates = driver.execute_script(script) or []
+    except Exception:
+        return []
 
-        if not isinstance(candidates, list):
-                return []
+    if not isinstance(candidates, list):
+        return []
 
-        return [candidate for candidate in candidates if isinstance(candidate, dict)]
+    return [candidate for candidate in candidates if isinstance(candidate, dict)]
 
 
 def _normalize_geocaching_log_url(url):
@@ -1073,7 +1073,7 @@ return false;
 
 
 def _run_project_gc_checker_if_available(driver, cache_name):
-    """Run Project-GC checker and detect success; retry once on max execution time."""
+    """Run Project-GC checker and return a normalized outcome code."""
     try:
         current_url = (driver.current_url or "").lower()
     except Exception:
@@ -1081,7 +1081,7 @@ def _run_project_gc_checker_if_available(driver, cache_name):
 
     if "project-gc.com" not in current_url:
         _log_message("CHECKER | Skipping run-checker step (not on Project-GC host)", "warning")
-        return False
+        return "off-host"
 
     def _has_success_marker():
         # Use strict/visible checks to avoid false positives from hidden template nodes.
@@ -1108,7 +1108,7 @@ return false;
         # Detect explicit negative result from Project-GC checker.
         try:
             return bool(driver.execute_script(
-                """
+                r"""
 const isVisible = (el) => !!el && !!(el.offsetParent || el.getClientRects().length);
 
 const cancelImg = document.querySelector("img[alt='Cancel'][src*='cancel48']");
@@ -1175,19 +1175,19 @@ return false;
         _log_message(f"CHECKER | Run checker button is present for {cache_name}; executing checker")
     elif _has_success_marker():
         _log_message(f"CHECKER | Success already present for {cache_name}; no run needed")
-        return True
+        return "success"
     elif _has_failure_marker():
         _log_message(f"CHECKER | Failure already present for {cache_name}; no run needed")
-        return False
+        return "failure"
     else:
         _log_message("CHECKER | Run checker button not present and no success marker visible", "warning")
-        return False
+        return "not-available"
 
     for attempt in range(1, 3):
         clicked = _click_run_checker()
         if not clicked:
             _log_message("CHECKER | Run checker button not found/clickable", "warning")
-            return False
+            return "run-button-error"
 
         _log_message(f"CHECKER | Waiting for checker result (attempt {attempt}/2)")
         deadline = time.time() + 95
@@ -1196,11 +1196,11 @@ return false;
         while time.time() < deadline:
             if _has_success_marker():
                 _log_message(f"CHECKER | Challenge check success detected for {cache_name}")
-                return True
+                return "success"
 
             if _has_failure_marker():
                 _log_message(f"CHECKER | Challenge check failure detected for {cache_name}")
-                return False
+                return "failure"
 
             if _max_execution_reached():
                 _log_message(
@@ -1222,7 +1222,7 @@ return false;
             _log_message("CHECKER | Retrying Run checker once after incomplete/timeout result")
 
     _log_message("CHECKER | Checker run did not reach success state after retries", "warning")
-    return False
+    return "timeout"
 
 
 def _extract_project_gc_example_log(driver):
@@ -1309,71 +1309,86 @@ return (el.value || el.textContent || el.innerText || '').trim();
 
 
 def _cache_has_user_found_it_log(driver, username):
-        """Return True when the cache page shows a Found It log from the specified user."""
-        target_user = (username or "").strip().lower()
-        if not target_user:
-                return False
+    """Return True only when a single log-row contains BOTH the target user AND a Found It marker."""
+    target_user = (username or "").strip()
+    if not target_user:
+        return False
 
-        script = r"""
-const normalize = (v) => String(v || '').trim().toLowerCase();
-const target = normalize(arguments[0]);
+    script = r"""
+const normalizeText = (v) => String(v || '').trim().toLowerCase();
+const normalizeName = (v) => normalizeText(v).replace(/\s+/g, ' ');
+const target = normalizeName(arguments[0]);
 if (!target) return false;
 
-const FOUND_MARKERS = [
-    'found it',
-    'found this geocache',
-    'log type: found it',
-    'logtype-2',
-    'log-type-2',
-    'wpttypes/2',
-    '/2.',
-    'smile',
+const PROFILE_LINK_SEL = 'a[href*="/profile/"], a[href*="/geocaching/profile/"]';
+
+const FOUND_IT_NODE_SELECTORS = [
+    '[data-log-type="2"]',
+    '[data-logtype="2"]',
+    '[class*="logtype-2" i]',
+    '[class*="log-type-2" i]',
+    '[class*="logtype2" i]',
+    '[class*="log-type-found" i]',
+    'img[src*="wpttypes/2" i]',
+    'img[alt="Found It" i]',
+    'img[title="Found It" i]',
+    '[aria-label="Found It" i]',
 ];
 
-const hasFoundMarker = (node) => {
-    if (!node) return false;
-    const text = normalize(node.textContent || '');
-    if (FOUND_MARKERS.some((m) => text.includes(m))) return true;
+// Collect every Found It marker node visible on the page.
+const foundItNodes = [];
+for (const sel of FOUND_IT_NODE_SELECTORS) {
+    try { Array.from(document.querySelectorAll(sel)).forEach(n => foundItNodes.push(n)); } catch(e) {}
+}
+if (foundItNodes.length === 0) return false;
 
-    const attrs = [];
-    for (const el of Array.from(node.querySelectorAll('img,svg,use,span,i,div,tr,li,article'))) {
-        attrs.push(
-            normalize(el.getAttribute && el.getAttribute('alt')),
-            normalize(el.getAttribute && el.getAttribute('title')),
-            normalize(el.getAttribute && el.getAttribute('class')),
-            normalize(el.getAttribute && el.getAttribute('src')),
-            normalize(el.getAttribute && el.getAttribute('data-logtype')),
-            normalize(el.getAttribute && el.getAttribute('data-log-type')),
-            normalize(el.getAttribute && el.getAttribute('aria-label')),
+// For each Found It marker, walk UP until we find a container that holds exactly
+// one distinct profile-link username — that is the bounded log row.
+// Then check whether that username is our target.
+for (const marker of foundItNodes) {
+    let current = marker.parentElement;
+    for (let depth = 0; depth < 15 && current && current !== document.body; depth += 1) {
+        const profileLinks = Array.from(current.querySelectorAll(PROFILE_LINK_SEL));
+        const distinctUsers = new Set(
+            profileLinks.map(a => normalizeName(a.textContent)).filter(Boolean)
         );
-    }
-    return attrs.some((value) => value && FOUND_MARKERS.some((m) => value.includes(m)));
-};
-
-const userLinks = Array.from(document.querySelectorAll('a[href], span, div, td, li')).filter((node) => {
-    const text = normalize(node.textContent || '');
-    if (!text) return false;
-    if (text !== target && !text.includes(target)) return false;
-    return true;
-});
-
-for (const node of userLinks) {
-    let current = node;
-    for (let depth = 0; depth < 12 && current; depth += 1) {
-        if (hasFoundMarker(current)) {
-            return true;
+        if (distinctUsers.size === 1) {
+            // Exactly one user in this container — this is the log row.
+            if (distinctUsers.has(target)) return true;
+            break; // This Found It belongs to a different user; stop climbing.
         }
+        if (distinctUsers.size > 1) break; // Crossed into a multi-user container.
+        // distinctUsers.size === 0 → username is in a higher ancestor; keep climbing.
         current = current.parentElement;
+    }
+}
+
+// --- Fallback: attribute on the log row itself ---
+// Some renderings put data-log-type / data-logtype on the row element directly.
+const LOG_ROW_SELECTORS = [
+    '[data-logid]', '[data-log-id]', '[data-logtype]', '[data-log-type]',
+    '[class*="logEntry" i]', '[class*="log-entry" i]',
+    '[class*="logItem" i]', '[class*="log-item" i]',
+    'li[class*="log" i]',
+];
+for (const sel of LOG_ROW_SELECTORS) {
+    let rows;
+    try { rows = Array.from(document.querySelectorAll(sel)); } catch(e) { continue; }
+    for (const row of rows) {
+        const lt = (row.getAttribute('data-log-type') || row.getAttribute('data-logtype') || '').trim();
+        if (lt !== '2') continue;
+        const profileLinks = Array.from(row.querySelectorAll(PROFILE_LINK_SEL));
+        if (profileLinks.some(a => normalizeName(a.textContent) === target)) return true;
     }
 }
 
 return false;
 """
 
-        try:
-                return bool(driver.execute_script(script, target_user))
-        except Exception:
-                return False
+    try:
+        return bool(driver.execute_script(script, target_user))
+    except Exception:
+        return False
 
 
 def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_checker_tab_open=False):
@@ -1431,6 +1446,7 @@ def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_c
 
         checker_href = _find_project_gc_checker_href(driver)
         if not checker_href:
+            checker_status = "No automated checker available"
             _log_message(f"CHECKER | No checker link found for {cache_name} ({cache_url})")
             return "", "", checker_status
 
@@ -1444,9 +1460,18 @@ def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_c
         time.sleep(1.5)
 
         _authenticate_project_gc_if_needed(driver, update_status)
-        run_success = _run_project_gc_checker_if_available(driver, cache_name)
-        checker_status = "SUCCESS!" if run_success else "Failed"
+        run_outcome = _run_project_gc_checker_if_available(driver, cache_name)
         checker_example_log = _extract_project_gc_example_log(driver)
+
+        if run_outcome == "success":
+            checker_status = "SUCCESS!" if checker_example_log else "Checker succeeded (no example log)"
+        elif run_outcome == "failure":
+            checker_status = "Checker indicates challenge not fulfilled"
+        elif run_outcome in {"not-available", "off-host"}:
+            checker_status = "No automated checker available"
+        else:
+            checker_status = "Checker run failed/error"
+
         checker_url = driver.current_url or checker_href
         return checker_url, checker_example_log, checker_status
     except Exception as exc:
@@ -2140,20 +2165,31 @@ def prepare_write_note_edit_log_page(driver, scan_results, status_callback=None)
     update_status("Fully Automated: live log page loaded; locating Edit log link...")
 
     selectors = [
-                _log_message(
-                    f"AUTOMATION | Clicked Edit log for {cache_label} on {driver.current_url}"
-                )
-                break
-    for selector in selectors:
+        (By.XPATH, "//a[.//span[normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='edit log']]|//button[.//span[normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='edit log']]|//a[normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='edit log']|//button[normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))='edit log']"),
+        (By.CSS_SELECTOR, "a[href*='/seek/log.aspx'], a[href*='log.aspx?LUID' i], a[href*='log.aspx?luid' i]"),
+    ]
+
+    clicked_edit = False
+    for by, locator in selectors:
         try:
-        else:
+            edit_link = WebDriverWait(driver, 8).until(
+                EC.element_to_be_clickable((by, locator))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", edit_link)
+            driver.execute_script("arguments[0].click();", edit_link)
+            clicked_edit = True
+            _log_message(
+                f"AUTOMATION | Clicked Edit log for {cache_label} on {driver.current_url}"
+            )
+            break
+        except Exception:
             continue
-        break
-    else:
+
+    if not clicked_edit:
         try:
-            clicked = bool(
+            clicked_edit = bool(
                 driver.execute_script(
-                    """
+                    r"""
 const spans = Array.from(document.querySelectorAll('span'));
 for (const span of spans) {
   const text = (span.textContent || '').trim().toLowerCase();
@@ -2168,7 +2204,7 @@ return false;
 """
                 )
             )
-            if clicked:
+            if clicked_edit:
                 _log_message(
                     f"AUTOMATION | Clicked Edit log via JavaScript fallback for {cache_label}"
                 )
@@ -2176,7 +2212,7 @@ return false;
                 return False, "Edit log link was not found on the live log page."
         except Exception:
             return False, "Edit log link was not found on the live log page."
-            spans = WebDriverWait(driver, 8).until(
+
     update_status("Fully Automated: selecting Found It log type...")
 
     found_type_selected = False
@@ -2320,25 +2356,6 @@ return false;
         f"AUTOMATION | Updated log for {cache_label} by selecting Found it and appending checker text"
     )
     return True, "Updated log by selecting Found it and appending checker example text."
-  const clickable = span.closest('a,button');
-  if (!clickable) continue;
-  clickable.scrollIntoView({block: 'center'});
-  clickable.click();
-  return true;
-}
-return false;
-"""
-            )
-        )
-        if clicked:
-            _log_message(
-                f"AUTOMATION | Clicked Edit log via JavaScript fallback for {cache_label}"
-            )
-            return True, "Clicked Edit log on live log page; browser left open for next-step logic."
-    except Exception:
-        pass
-
-    return False, "Edit log link was not found on the live log page."
 
 
 # ---------------------------------------------------------------------------
