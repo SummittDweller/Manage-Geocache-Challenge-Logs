@@ -1320,6 +1320,25 @@ const normalizeName = (v) => normalizeText(v).replace(/\s+/g, ' ');
 const target = normalizeName(arguments[0]);
 if (!target) return false;
 
+// === FIRST: Check if the page itself indicates the current user already found it ===
+// Geocaching.com displays a "Found It!" badge when the logged-in user views a cache they've found.
+// Look for this indicator in the page navigation/header area.
+const pageStatusIndicators = [
+    '#ctl00_ContentBody_GeoNav_logText',  // Geocaching.com specific ID
+    '[id*="GeoNav"][id*="logText"]',
+    '[class*="found-it-badge" i]',
+    '[class*="already-found" i]',
+    '[data-user-status="found"]',
+];
+for (const sel of pageStatusIndicators) {
+    try {
+        const elem = document.querySelector(sel);
+        if (elem && normalizeText(elem.textContent).includes('found it')) {
+            return true;  // Current user already found this cache — no need to check logs.
+        }
+    } catch(e) {}
+}
+
 const PROFILE_LINK_SEL = 'a[href*="/profile/"], a[href*="/geocaching/profile/"]';
 
 const FOUND_IT_NODE_SELECTORS = [
