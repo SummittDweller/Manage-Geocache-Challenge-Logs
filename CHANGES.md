@@ -1,5 +1,49 @@
 # Bug Fixes - April 26, 2026
 
+## Update - April 27, 2026
+
+### Config toggle added: `DELETE_WRITE_NOTE_LOG_WHEN_FOUND`
+
+- Added new `.env` boolean: `DELETE_WRITE_NOTE_LOG_WHEN_FOUND`
+- Default: `false`
+- Behavior when `false`: detect/report Write Note + Found It combinations,
+   skip checker, and do not attempt deletion.
+- Behavior when `true`: detect/report combinations and attempt stale Write Note
+   deletion from `log_url`.
+
+Status behavior now includes:
+
+- `Write Note + Found It (cleanup disabled)` when toggle is off
+- `Write Note + Found It (Write Note deleted)` when delete succeeds
+- `Write Note + Found It (Write Note not deleted)` when delete cannot be confirmed
+
+### New Behavior: Auto-delete stale Write Note when Found It already exists
+
+When scanning each challenge cache, if the target user is detected as already
+having a Found It log, the app now:
+
+1. Skips Project-GC checker execution for that cache.
+2. Attempts to open the row's `log_url` and delete the stale Write Note log.
+3. Records whether cleanup succeeded directly in `checker_status`.
+
+New status values:
+
+- `Write Note + Found It (Write Note deleted)`
+- `Write Note + Found It (Write Note not deleted)`
+
+Implementation notes:
+
+- Added helper `_delete_write_note_log_if_possible()` in `src/functions.py`.
+- Updated `_open_checker_for_cache()` to call the delete helper before returning.
+- Updated scan call site to pass each row's `log_url` into
+   `_open_checker_for_cache()`.
+- Updated summary counting in `src/main.py` so all `Write Note + Found It (...)`
+   variants are counted as already-found, and deletion counts are shown.
+
+Validation:
+
+- `py_compile` passes for updated Python files.
+
 ## Overview
 Fixed critical false-positive and false-negative bugs in the Found It log detector that were causing:
 - Incorrect "Write Note + Found It" classifications for users

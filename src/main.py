@@ -1,5 +1,9 @@
 import flet as ft
+import atexit
 import os
+import sys
+import threading
+import traceback
 import functions as fn
 from app_refs import (
     firefox_profile_path_ref,
@@ -17,6 +21,30 @@ from app_refs import (
 # Main function to run the Flet app
 # --------------------------------------------------------------------------------
 def main(page: ft.Page):
+    driver_holder = {"driver": None}
+
+    def _cleanup_driver_once():
+        driver = driver_holder.get("driver")
+        if driver is None:
+            return
+        fn.shutdown_driver(driver)
+        driver_holder["driver"] = None
+
+    atexit.register(_cleanup_driver_once)
+
+    def _global_excepthook(exc_type, exc_value, exc_tb):
+        formatted = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        fn._log_message(f"UNCAUGHT | {formatted}", "error")
+
+    sys.excepthook = _global_excepthook
+
+    def _thread_excepthook(args):
+        formatted = "".join(
+            traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        )
+        fn._log_message(f"UNCAUGHT_THREAD | {formatted}", "error")
+
+    threading.excepthook = _thread_excepthook
 
     def _env_bool(name: str, default: bool = False) -> bool:
         raw = (os.getenv(name, "") or "").strip().lower()
@@ -72,6 +100,10 @@ def main(page: ft.Page):
     env_profile_path = (os.getenv("FIREFOX_PROFILE_PATH") or "").strip()
     env_remember_set = (os.getenv("REMEMBER_GEOCACHING_PASSWORD", "") or "").strip() != ""
     env_remember_password = _env_bool("REMEMBER_GEOCACHING_PASSWORD", default=False)
+    env_delete_write_note_when_found = _env_bool(
+        "DELETE_WRITE_NOTE_LOG_WHEN_FOUND",
+        default=False,
+    )
 
     # Default behavior: if .env provides credentials, use them to prefill fields.
     prefer_env_defaults = _env_bool("GC_PREFER_ENV_CREDENTIALS", default=True)
@@ -91,6 +123,16 @@ def main(page: ft.Page):
         stored_remember_password = env_remember_password
     else:
         stored_remember_password = persisted_remember_password
+
+    persisted_delete_write_note_when_found = page.client_storage.get(
+        "delete_write_note_log_when_found"
+    )
+    if persisted_delete_write_note_when_found is None:
+        stored_delete_write_note_when_found = env_delete_write_note_when_found
+    else:
+        stored_delete_write_note_when_found = bool(
+            persisted_delete_write_note_when_found
+        )
 
     if prefer_env_defaults:
         username_source = (
@@ -177,6 +219,15 @@ def main(page: ft.Page):
     )
     page.add(fully_automated_checkbox)
 
+    delete_write_note_checkbox = ft.Checkbox(
+        label="Auto-delete Write Note when Found It already exists",
+        value=stored_delete_write_note_when_found,
+        on_change=lambda e: page.client_storage.set(
+            "delete_write_note_log_when_found", bool(e.control.value)
+        ),
+    )
+    page.add(delete_write_note_checkbox)
+
     # Optional Firefox profile path
     profile_field = ft.TextField(
         label="Firefox profile folder (optional – paste full path or leave blank)",
@@ -230,6 +281,7 @@ def main(page: ft.Page):
 
         try:
             driver = fn.initialize_driver(page, username=username, password=password)
+            driver_holder["driver"] = driver
         except Exception as exc:
             err = str(exc).strip() or "Startup failed."
             loading_status_ref.current.value = err
@@ -238,6 +290,13 @@ def main(page: ft.Page):
             loading_status_ref.current.update()
             progress_bar_ref.current.update()
             return
+
+        # Per-run runtime override for stale Write Note deletion behavior.
+        driver._delete_write_note_log_when_found = bool(delete_write_note_checkbox.value)
+        fn._log_message(
+            "STARTUP | Delete stale Write Note when Found It is present: "
+            f"{driver._delete_write_note_log_when_found}"
+        )
 
         # Update loading status
         loading_status_ref.current.value = (
@@ -309,7 +368,7 @@ def main(page: ft.Page):
             total_checked = len(scan_results or [])
             statuses = [str((row or {}).get("checker_status") or "").strip() for row in (scan_results or [])]
 
-            found_it_already = sum(1 for status in statuses if status == "Write Note + Found It")
+            found_it_already = sum(1 for status in statuses if status.startswith("Write Note + Found It"))
             no_checker = sum(1 for status in statuses if status == "No automated checker available")
             failed_validation = sum(
                 1 for status in statuses if status == "Checker indicates challenge not fulfilled"
@@ -319,11 +378,29 @@ def main(page: ft.Page):
                 for status in statuses
                 if status in {"SUCCESS!", "Checker succeeded (no example log)"}
             )
+            deleted_write_note = sum(
+                1
+                for status in statuses
+                if status == "Write Note + Found It (Write Note deleted)"
+            )
+            not_deleted_write_note = sum(
+                1
+                for status in statuses
+                if status == "Write Note + Found It (Write Note not deleted)"
+            )
+            cleanup_disabled_write_note = sum(
+                1
+                for status in statuses
+                if status == "Write Note + Found It (cleanup disabled)"
+            )
 
             return (
                 "Summary:\n"
                 f"Listings checked: {total_checked}\n"
                 f"Already Found It logs: {found_it_already}\n"
+                f"Write Note logs auto-deleted: {deleted_write_note}\n"
+                f"Write Note logs not deleted: {not_deleted_write_note}\n"
+                f"Write Note cleanup disabled: {cleanup_disabled_write_note}\n"
                 f"No automated checker: {no_checker}\n"
                 f"Checker failed validation: {failed_validation}\n"
                 f"Checker PASSED! validation: {passed_validation}"
@@ -331,8 +408,6 @@ def main(page: ft.Page):
 
         # ---- Scan button ----------------------------------------------------
         def on_scan_click(e):
-            import threading
-
             if scan_launch_state["started"]:
                 return
             scan_launch_state["started"] = True
@@ -456,7 +531,6 @@ def main(page: ft.Page):
             if not scan_launch_state["started"]:
                 on_scan_click(None)
 
-        import threading
         threading.Thread(target=auto_start_scan, daemon=True).start()
 
     start_button.on_click = on_start_click

@@ -4,8 +4,10 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import traceback
+import warnings
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
@@ -19,6 +21,7 @@ from app_refs import (
 )
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.service import Service as SeleniumBaseService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
@@ -31,12 +34,101 @@ except Exception:
     GeckoDriverManager = None
 
 
+_ORIGINAL_SELENIUM_TERMINATE_PROCESS = None
+
+
+def _patch_selenium_service_terminate_process():
+    """Patch Selenium service stop to tolerate TimeoutExpired at process shutdown."""
+    global _ORIGINAL_SELENIUM_TERMINATE_PROCESS
+    if _ORIGINAL_SELENIUM_TERMINATE_PROCESS is not None:
+        return
+
+    _ORIGINAL_SELENIUM_TERMINATE_PROCESS = SeleniumBaseService._terminate_process
+
+    def _safe_terminate_process(self):
+        try:
+            return _ORIGINAL_SELENIUM_TERMINATE_PROCESS(self)
+        except subprocess.TimeoutExpired as exc:
+            _log_message(
+                f"SHUTDOWN | Selenium service terminate timed out; forcing kill: {exc}",
+                "warning",
+            )
+        except Exception as exc:
+            _log_message(
+                f"SHUTDOWN | Selenium service terminate raised; forcing kill: {exc}",
+                "warning",
+            )
+
+        process = getattr(self, "process", None)
+        if not process:
+            return
+
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        except Exception as kill_exc:
+            _log_message(
+                f"SHUTDOWN | Selenium forced service kill failed: {kill_exc}",
+                "warning",
+            )
+        finally:
+            self.process = None
+
+    SeleniumBaseService._terminate_process = _safe_terminate_process
+
+
+_patch_selenium_service_terminate_process()
+
+
+class SafeFirefoxService(FirefoxService):
+    """Firefox service that force-kills geckodriver if graceful stop times out."""
+
+    def _terminate_process(self):
+        try:
+            super()._terminate_process()
+            return
+        except subprocess.TimeoutExpired as exc:
+            _log_message(
+                f"SHUTDOWN | FirefoxService terminate timed out; forcing kill: {exc}",
+                "warning",
+            )
+        except Exception as exc:
+            _log_message(
+                f"SHUTDOWN | FirefoxService terminate raised; forcing kill: {exc}",
+                "warning",
+            )
+
+        process = getattr(self, "process", None)
+        if not process:
+            return
+
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        except Exception as kill_exc:
+            _log_message(
+                f"SHUTDOWN | Forced geckodriver kill failed: {kill_exc}",
+                "warning",
+            )
+        finally:
+            self.process = None
+
+
 _APP_LOGGER = None
 _APP_LOG_PATH = Path(__file__).parent.parent / "manage_geocache_challenge_logs.log"
 _IN_PROGRESS_CSV_PATH = Path(__file__).parent.parent / "challenge_write_notes_in_progress.csv"
 
 # Load local .env (if present) so runtime toggles can be controlled without shell exports.
 load_dotenv(Path(__file__).parent.parent / ".env", override=False)
+
+
+def _env_bool(name, default=False):
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
 def _get_stop_after_match_count():
     """
@@ -72,6 +164,24 @@ _DEBUG_STOP_AFTER_FILTER_APPLIED = (
     os.getenv("GC_DEBUG_STOP_AFTER_FILTER_APPLIED", "false").strip().lower()
     in {"1", "true", "yes", "on"}
 )
+_DELETE_WRITE_NOTE_LOG_WHEN_FOUND = _env_bool(
+    "DELETE_WRITE_NOTE_LOG_WHEN_FOUND",
+    default=False,
+)
+
+
+def _should_delete_write_note_log_when_found(driver=None):
+    """Resolve delete behavior with runtime override support.
+
+    Order of precedence:
+    1) driver runtime override (set by UI for current run)
+    2) .env / process environment default
+    """
+    if driver is not None:
+        runtime_value = getattr(driver, "_delete_write_note_log_when_found", None)
+        if runtime_value is not None:
+            return bool(runtime_value)
+    return _DELETE_WRITE_NOTE_LOG_WHEN_FOUND
 
 
 def _get_app_logger():
@@ -114,6 +224,48 @@ def _log_exception(context, exc):
     _get_app_logger().error(traceback.format_exc())
 
 
+def shutdown_driver(driver):
+    """Best-effort WebDriver shutdown that tolerates stuck geckodriver exits."""
+    if driver is None:
+        return
+
+    try:
+        driver.quit()
+        return
+    except subprocess.TimeoutExpired as exc:
+        _log_message(
+            f"SHUTDOWN | driver.quit() timed out, forcing geckodriver stop: {exc}",
+            "warning",
+        )
+    except Exception as exc:
+        _log_message(
+            f"SHUTDOWN | driver.quit() raised, attempting force stop: {exc}",
+            "warning",
+        )
+
+    try:
+        service = getattr(driver, "service", None)
+        process = getattr(service, "process", None)
+        if not process:
+            return
+
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:
+                pass
+
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+    except Exception as exc:
+        _log_message(f"SHUTDOWN | Forced geckodriver stop failed: {exc}", "warning")
+
+
 def _is_firefox_profile_locked(profile_path):
     """Return True when lock artifacts suggest the profile is currently in use."""
     if not profile_path:
@@ -129,6 +281,69 @@ def _is_firefox_profile_locked(profile_path):
         if Path(profile_path, lock_name).exists():
             return True
     return False
+
+
+def _is_usable_geckodriver(path):
+    """Return True when geckodriver exists, is executable, and responds to --version."""
+    if not path:
+        return False
+
+    try:
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return False
+
+        # Ensure execute bit is present for the current user.
+        if not os.access(str(p), os.X_OK):
+            try:
+                mode = p.stat().st_mode
+                p.chmod(mode | 0o111)
+            except Exception:
+                return False
+
+        probe = subprocess.run(
+            [str(p), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        return probe.returncode == 0
+    except Exception:
+        return False
+
+
+def _launch_firefox_with_timeout(service, options, timeout_seconds=30):
+    """
+    Launch Firefox WebDriver with a timeout to prevent indefinite hangs.
+    
+    Returns (driver, error_msg) tuple:
+    - On success: (driver, None)
+    - On timeout: (None, "timeout")
+    - On error: (None, str(exception))
+    """
+    import threading
+    
+    result = {"driver": None, "error": None}
+    
+    def launch_in_thread():
+        try:
+            result["driver"] = webdriver.Firefox(service=service, options=options)
+        except Exception as e:
+            result["error"] = str(e)
+    
+    thread = threading.Thread(target=launch_in_thread, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    
+    if thread.is_alive():
+        # Timeout occurred; thread is still running but we'll abandon it
+        return (None, "timeout")
+    
+    if result["error"]:
+        return (None, result["error"])
+    
+    return (result["driver"], None)
 
 
 def _read_json_body(driver):
@@ -1410,7 +1625,121 @@ return false;
         return False
 
 
-def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_checker_tab_open=False):
+def _delete_write_note_log_if_possible(driver, log_url, cache_name):
+    """Best-effort delete of a Write Note log from its log URL.
+
+    Returns:
+        tuple[bool, str]: (deleted, detail message)
+    """
+    normalized_log_url = _normalize_geocaching_log_url(log_url or "")
+    if not normalized_log_url:
+        return False, "No log URL available for deletion."
+
+    try:
+        driver.get(normalized_log_url)
+        time.sleep(1.2)
+    except Exception as exc:
+        return False, f"Could not open log URL for deletion: {exc}"
+
+    try:
+        clicked_delete = bool(
+            driver.execute_script(
+                r"""
+const normalize = (v) => String(v || '').trim().toLowerCase();
+
+const clickFirstMatching = (nodes, labels) => {
+  for (const el of nodes) {
+    const text = normalize(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
+    if (!text) continue;
+    if (!labels.some((lbl) => text.includes(lbl))) continue;
+    if (el.disabled) continue;
+    el.scrollIntoView({block: 'center'});
+    el.click();
+    return true;
+  }
+  return false;
+};
+
+const deleteLabels = ['delete log', 'delete this log', 'delete'];
+const deleteCandidates = Array.from(document.querySelectorAll(
+  "button, a[role='button'], a, input[type='button'], input[type='submit']"
+));
+if (!clickFirstMatching(deleteCandidates, deleteLabels)) {
+  return false;
+}
+
+return true;
+"""
+            )
+        )
+    except Exception as exc:
+        return False, f"Delete control interaction failed: {exc}"
+
+    if not clicked_delete:
+        return False, "Delete Log button/link was not found on the log page."
+
+    # Accept native JS confirm() dialogs if they appear.
+    try:
+        WebDriverWait(driver, 2).until(EC.alert_is_present())
+        driver.switch_to.alert.accept()
+    except Exception:
+        pass
+
+    # Try clicking an in-page confirmation control when a modal is used.
+    try:
+        driver.execute_script(
+            r"""
+const normalize = (v) => String(v || '').trim().toLowerCase();
+const confirmLabels = ['delete', 'yes', 'confirm', 'remove'];
+const candidates = Array.from(document.querySelectorAll(
+  "[role='dialog'] button, [role='dialog'] a, [role='dialog'] input[type='button'], [role='dialog'] input[type='submit'], .modal button, .modal a, .modal input[type='button'], .modal input[type='submit']"
+));
+for (const el of candidates) {
+  const text = normalize(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
+  if (!text) continue;
+  if (!confirmLabels.some((lbl) => text.includes(lbl))) continue;
+  if (text.includes('cancel') || text.includes('close')) continue;
+  if (el.disabled) continue;
+  el.scrollIntoView({block: 'center'});
+  el.click();
+  return true;
+}
+return false;
+"""
+        )
+    except Exception:
+        pass
+
+    time.sleep(2.0)
+
+    # Verify by revisiting the same log URL: deleted logs usually no longer resolve
+    # to the same /live/log/ entry page.
+    try:
+        driver.get(normalized_log_url)
+        time.sleep(1.5)
+        current_url = (driver.current_url or "").lower()
+        page_text = (driver.execute_script("return (document.body && document.body.innerText) || '';") or "").lower()
+    except Exception:
+        return True, "Delete action submitted; verification via reload was unavailable."
+
+    not_found_markers = [
+        "not found",
+        "could not be found",
+        "doesn't exist",
+        "does not exist",
+        "not available",
+    ]
+    unresolved_live_log = "/live/log/" in current_url
+    has_not_found_marker = any(marker in page_text for marker in not_found_markers)
+
+    if (not unresolved_live_log) or has_not_found_marker:
+        _log_message(f"CHECKER | Deleted Write Note log for {cache_name}: {normalized_log_url}")
+        return True, "Write Note log deleted."
+
+    return False, "Delete was attempted but could not be verified."
+
+
+def _open_checker_for_cache(driver, cache_url, cache_name, update_status, log_url="", keep_checker_tab_open=False):
     """Open checker page and return checker URL plus generated Project-GC example log text."""
     checker_url = ""
     checker_example_log = ""
@@ -1454,12 +1783,34 @@ def _open_checker_for_cache(driver, cache_url, cache_name, update_status, keep_c
 
         if active_user and _cache_has_user_found_it_log(driver, active_user):
             checker_status = "Write Note + Found It"
-            checker_example_log = (
-                f"User '{active_user}' already has a Found It log on this cache."
-            )
+            checker_example_log = f"User '{active_user}' already has a Found It log on this cache."
+
+            if _should_delete_write_note_log_when_found(driver):
+                deleted, delete_detail = _delete_write_note_log_if_possible(driver, log_url, cache_name)
+                if deleted:
+                    checker_status = "Write Note + Found It (Write Note deleted)"
+                    checker_example_log = (
+                        f"User '{active_user}' already has a Found It log on this cache. "
+                        f"Write Note cleanup: {delete_detail}"
+                    )
+                else:
+                    checker_status = "Write Note + Found It (Write Note not deleted)"
+                    checker_example_log = (
+                        f"User '{active_user}' already has a Found It log on this cache. "
+                        f"Write Note cleanup: {delete_detail}"
+                    )
+            else:
+                delete_detail = "Cleanup disabled by DELETE_WRITE_NOTE_LOG_WHEN_FOUND=false"
+                checker_status = "Write Note + Found It (cleanup disabled)"
+                checker_example_log = (
+                    f"User '{active_user}' already has a Found It log on this cache. "
+                    f"Write Note cleanup: {delete_detail}"
+                )
+
             checker_url = cache_url
             _log_message(
-                f"CHECKER | Found existing Found It log for {active_user} on {cache_name}; skipping checker"
+                f"CHECKER | Found existing Found It log for {active_user} on {cache_name}; "
+                f"skipping checker | Write Note cleanup: {delete_detail}"
             )
             return checker_url, checker_example_log, checker_status
 
@@ -1625,16 +1976,66 @@ def initialize_driver(page, username=None, password=None):
     update_loading("Launching Firefox...", 0.10)
 
     service = None
-    if GeckoDriverManager:
+    gecko_path = None
+    
+    # Skip webdriver-manager by default (broken on some systems).
+    # Only use it if explicitly enabled via environment variable.
+    use_webdriver_manager = _env_bool("USE_WEBDRIVER_MANAGER_GECKODRIVER", default=False)
+    
+    if use_webdriver_manager and GeckoDriverManager:
         try:
-            service = FirefoxService(GeckoDriverManager().install())
+            # webdriver-manager currently triggers a tarfile deprecation warning
+            # on Python 3.12+ while extracting the driver archive.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Python 3\.14 will, by default, filter extracted tar archives.*",
+                    category=DeprecationWarning,
+                )
+                gecko_path = GeckoDriverManager().install()
         except Exception:
-            service = None
+            gecko_path = None
 
-    if service:
-        driver = webdriver.Firefox(service=service, options=options)
-    else:
-        driver = webdriver.Firefox(options=options)
+    if gecko_path and not _is_usable_geckodriver(gecko_path):
+        _log_message(
+            f"STARTUP | webdriver-manager geckodriver is not usable: {gecko_path}. "
+            "Falling back to Selenium driver resolution.",
+            "warning",
+        )
+        gecko_path = None
+
+    launch_errors = []
+    service_attempts = []
+    if gecko_path:
+        service_attempts.append(("webdriver-manager", SafeFirefoxService(executable_path=gecko_path)))
+    service_attempts.append(("selenium-default", SafeFirefoxService()))
+
+    driver = None
+    for label, service in service_attempts:
+        try:
+            _log_message(f"STARTUP | Attempting Firefox launch via {label} service (timeout=30s)")
+            driver, launch_error = _launch_firefox_with_timeout(service, options, timeout_seconds=30)
+            if launch_error == "timeout":
+                launch_errors.append(f"{label}: timeout after 30s")
+                _log_message(f"STARTUP | Firefox launch attempt timed out ({label})", "warning")
+                continue
+            if launch_error:
+                launch_errors.append(f"{label}: {launch_error}")
+                _log_exception(f"STARTUP | Firefox launch attempt failed ({label})", Exception(launch_error))
+                continue
+            if driver:
+                break
+        except Exception as exc:
+            launch_errors.append(f"{label}: {exc}")
+            _log_exception(f"STARTUP | Firefox launch attempt failed ({label})", exc)
+
+    if driver is None:
+        joined = " | ".join(launch_errors) if launch_errors else "no launch attempts"
+        raise RuntimeError(
+            "Firefox WebDriver failed to launch after fallback attempts: "
+            f"{joined}"
+        )
+
     _log_message("STARTUP | Firefox launched successfully")
 
     driver.set_window_size(1280, 900)
@@ -2059,6 +2460,7 @@ def _scan_via_html(driver, update_status, update_progress):
                         cache_url,
                         cache_name,
                         update_status,
+                        log_url=geocaching_log_url,
                         keep_checker_tab_open=(stop_after_matches > 0 and len(results) + 1 >= stop_after_matches),
                     )
                     _log_message(

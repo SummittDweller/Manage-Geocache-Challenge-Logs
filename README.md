@@ -29,7 +29,11 @@ and uses Selenium to drive a real Firefox browser session.
   checker, and detects both success and failure outcomes.
 - **Existing found-log short-circuit** – if the selected user already has a
   **Found It** log on a cache page, the app records that cache as
-  `Write Note + Found It` and skips Project-GC checker execution.
+  `Write Note + Found It (...)`, skips Project-GC checker execution, and
+  optionally attempts to delete the stale Write Note log from `log_url`
+  when `DELETE_WRITE_NOTE_LOG_WHEN_FOUND=true`.
+- **Per-run delete override** – a startup checkbox lets you override the
+  delete behavior for the current run without editing `.env`.
 - **Fully Automated mode (preview)** – optional mode that opens a selected
   `../live/log/...` page, clicks **Edit log**, switches log type from
   **Write note** to **Found it**, appends checker text to the log body, clicks
@@ -71,15 +75,18 @@ chmod +x run.sh
 4. **Optional Fully Automated mode** – check
   **Fully Automated - Change Write Note to Found** before running if you want
   the app to attempt the live-log conversion flow.
-5. **Scan** – click **Scan My Logs**.  The app will page through all your Write
+5. **Optional stale Write Note cleanup** – check
+  **Auto-delete Write Note when Found It already exists** to attempt deleting
+  stale Write Note logs during this run.
+6. **Scan** – click **Scan My Logs**.  The app will page through all your Write
   Note logs, first checking each cache page for an existing Found It log from
-  the specified user. If found, it records `Write Note + Found It` and moves
-  on; otherwise it opens challenge checker pages and evaluates qualification
-  state.
-6. **Results** – when the scan finishes, a summary is shown and a CSV file is
+  the specified user. If found, it records `Write Note + Found It (...)`,
+  attempts to delete the stale Write Note log, and moves on; otherwise it
+  opens challenge checker pages and evaluates qualification state.
+7. **Results** – when the scan finishes, a summary is shown and a CSV file is
   saved to your home directory. Open the CSV with any spreadsheet application
    to review the results.
-7. **Log file** – detailed scan and startup logs are written to
+8. **Log file** – detailed scan and startup logs are written to
   `manage_geocache_challenge_logs.log` in the project root.
 
 ### Fully Automated mode behavior
@@ -107,6 +114,10 @@ The app loads `.env` automatically at startup.
 | `GC_DEBUG_STOP_AFTER_MATCH_COUNT` | Debug stop threshold. `0` = no early stop (default), `N` = stop after `N` matched candidates and keep browser open |
 | `GC_DEBUG_STOP_AFTER_FIRST_LOG` | Legacy fallback. `true/1` = stop after 1, `false/0` = no early stop |
 | `GC_DEBUG_STOP_AFTER_FILTER_APPLIED` | Temporary selector-debug mode. `true/1` = stop immediately after Write Note filter is applied and leave browser open |
+| `DELETE_WRITE_NOTE_LOG_WHEN_FOUND` | `false` (default) = report Write Note + Found It only, `true` = also attempt deleting stale Write Note log |
+
+Note: the startup checkbox **Auto-delete Write Note when Found It already exists**
+overrides this env value for the current run.
 
 ---
 
@@ -119,7 +130,7 @@ The app loads `.env` automatically at startup.
 | `cache_name` | Full name of the Challenge Cache |
 | `cache_url` | Direct link to the cache page on geocaching.com |
 | `log_url` | Direct link to your geocaching.com Write Note log entry (including modern `/live/log/GL...` links when detectable from the filtered logs page) |
-| `checker_status` | Outcome: `SUCCESS!`, `Failed`, or `Write Note + Found It` |
+| `checker_status` | Outcome examples: `SUCCESS!`, `Checker indicates challenge not fulfilled`, `No automated checker available`, `Write Note + Found It (cleanup disabled)`, `Write Note + Found It (Write Note deleted)`, `Write Note + Found It (Write Note not deleted)` |
 | `checker_example_log` | Project-GC generated text suitable for copy/paste into a Found It log |
 
 Results are sorted by `log_date` descending (newest first).
@@ -160,6 +171,21 @@ During a running scan, an autosave file is also maintained at
 
 - Meaning: Checker result indicates you currently do not qualify.
 - Action: CSV `checker_status` will be `Failed` for that cache.
+
+### `Write Note + Found It (Write Note not deleted)`
+
+- Meaning: The app detected that you already have a Found It on the cache and
+  skipped checker execution, but could not confirm deletion of the stale Write
+  Note log.
+- Action: Open `log_url` from the CSV row and delete that Write Note manually,
+  then re-run if needed.
+
+### `Write Note + Found It (cleanup disabled)`
+
+- Meaning: The app detected that you already have a Found It on the cache and
+  skipped checker execution, but deletion was intentionally disabled by config.
+- Action: Set `DELETE_WRITE_NOTE_LOG_WHEN_FOUND=true` in `.env` if you want
+  automatic stale Write Note deletion on future runs.
 
 ### `Example log textarea found no content`
 
