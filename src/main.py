@@ -104,6 +104,10 @@ def main(page: ft.Page):
         "DELETE_WRITE_NOTE_LOG_WHEN_FOUND",
         default=False,
     )
+    env_disable_challenge_checker = _env_bool(
+        "DISABLE_CHALLENGE_CHECKER",
+        default=True,
+    )
 
     # Default behavior: if .env provides credentials, use them to prefill fields.
     prefer_env_defaults = _env_bool("GC_PREFER_ENV_CREDENTIALS", default=True)
@@ -133,6 +137,14 @@ def main(page: ft.Page):
         stored_delete_write_note_when_found = bool(
             persisted_delete_write_note_when_found
         )
+
+    persisted_disable_challenge_checker = page.client_storage.get(
+        "disable_challenge_checker"
+    )
+    if persisted_disable_challenge_checker is None:
+        stored_disable_challenge_checker = env_disable_challenge_checker
+    else:
+        stored_disable_challenge_checker = bool(persisted_disable_challenge_checker)
 
     if prefer_env_defaults:
         username_source = (
@@ -228,6 +240,15 @@ def main(page: ft.Page):
     )
     page.add(delete_write_note_checkbox)
 
+    disable_challenge_checker_checkbox = ft.Checkbox(
+        label="Skip challenge checker (faster scan)",
+        value=stored_disable_challenge_checker,
+        on_change=lambda e: page.client_storage.set(
+            "disable_challenge_checker", bool(e.control.value)
+        ),
+    )
+    page.add(disable_challenge_checker_checkbox)
+
     # Optional Firefox profile path
     profile_field = ft.TextField(
         label="Firefox profile folder (optional – paste full path or leave blank)",
@@ -296,6 +317,12 @@ def main(page: ft.Page):
         fn._log_message(
             "STARTUP | Delete stale Write Note when Found It is present: "
             f"{driver._delete_write_note_log_when_found}"
+        )
+
+        driver._disable_challenge_checker = bool(disable_challenge_checker_checkbox.value)
+        fn._log_message(
+            "STARTUP | Disable challenge checker runs: "
+            f"{driver._disable_challenge_checker}"
         )
 
         # Update loading status
@@ -381,17 +408,22 @@ def main(page: ft.Page):
             deleted_write_note = sum(
                 1
                 for status in statuses
-                if status == "Write Note + Found It (Write Note deleted)"
+                if status.startswith("Write Note + Found It (Write Note deleted")
             )
             not_deleted_write_note = sum(
                 1
                 for status in statuses
-                if status == "Write Note + Found It (Write Note not deleted)"
+                if status.startswith("Write Note + Found It (Write Note not deleted")
             )
             cleanup_disabled_write_note = sum(
                 1
                 for status in statuses
-                if status == "Write Note + Found It (cleanup disabled)"
+                if status.startswith("Write Note + Found It (cleanup disabled")
+            )
+            checker_skipped = sum(
+                1
+                for status in statuses
+                if status.startswith("Checker skipped (disabled")
             )
 
             return (
@@ -401,6 +433,7 @@ def main(page: ft.Page):
                 f"Write Note logs auto-deleted: {deleted_write_note}\n"
                 f"Write Note logs not deleted: {not_deleted_write_note}\n"
                 f"Write Note cleanup disabled: {cleanup_disabled_write_note}\n"
+                f"Checker skipped (disabled): {checker_skipped}\n"
                 f"No automated checker: {no_checker}\n"
                 f"Checker failed validation: {failed_validation}\n"
                 f"Checker PASSED! validation: {passed_validation}"

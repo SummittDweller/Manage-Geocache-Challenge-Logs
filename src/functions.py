@@ -1641,34 +1641,101 @@ def _delete_write_note_log_if_possible(driver, log_url, cache_name):
     except Exception as exc:
         return False, f"Could not open log URL for deletion: {exc}"
 
+        # Some log URLs land on a page with a "View / Edit Log / Images" link.
+        # Follow that link first so the Delete Log controls are available.
+        try:
+                edit_log_url = driver.execute_script(
+                        r"""
+const normalize = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+const anchors = Array.from(document.querySelectorAll('a[href]'));
+for (const a of anchors) {
+    const href = String(a.getAttribute('href') || '').trim();
+    if (!href) continue;
+
+    const isClassicLogHref = /\/seek\/log\.aspx/i.test(href) || /log\.aspx\?luid=/i.test(href);
+    if (!isClassicLogHref) continue;
+
+    const title = normalize(a.getAttribute('title'));
+    const text = normalize(a.textContent);
+    const looksLikeEditLink =
+        title.includes('view log') ||
+        text.includes('view / edit log') ||
+        text.includes('view/edit log') ||
+        text.includes('edit log') ||
+        text.includes('log / images');
+
+    if (!looksLikeEditLink) continue;
+
+    try {
+        return new URL(href, window.location.href).href;
+    } catch (e) {
+        return href;
+    }
+}
+return '';
+"""
+                )
+                if isinstance(edit_log_url, str) and edit_log_url.strip():
+                        candidate = edit_log_url.strip()
+                        if candidate.lower() != (driver.current_url or "").lower():
+                                driver.get(candidate)
+                                time.sleep(1.0)
+        except Exception:
+                # Non-fatal; continue with whatever page is open.
+                pass
+
     try:
         clicked_delete = bool(
             driver.execute_script(
                 r"""
 const normalize = (v) => String(v || '').trim().toLowerCase();
 
-const clickFirstMatching = (nodes, labels) => {
-  for (const el of nodes) {
-    const text = normalize(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
-    if (!text) continue;
-    if (!labels.some((lbl) => text.includes(lbl))) continue;
-    if (el.disabled) continue;
-    el.scrollIntoView({block: 'center'});
-    el.click();
-    return true;
-  }
-  return false;
+const tryClick = (el) => {
+    if (!el) return false;
+    if (el.disabled) return false;
+    try {
+        el.scrollIntoView({block: 'center'});
+        el.click();
+        return true;
+    } catch (e) {
+        return false;
+    }
 };
 
-const deleteLabels = ['delete log', 'delete this log', 'delete'];
-const deleteCandidates = Array.from(document.querySelectorAll(
-  "button, a[role='button'], a, input[type='button'], input[type='submit']"
-));
-if (!clickFirstMatching(deleteCandidates, deleteLabels)) {
-  return false;
+const explicitSelectors = [
+    "button[data-testid='delete-log-modal-open']",
+    "button[data-testid='delete-log']",
+    "button[id*='delete'][id*='log' i]",
+    "button[class*='delete-log' i]",
+    "a[class*='delete-log' i]",
+    "button[aria-label*='delete log' i]",
+    "a[aria-label*='delete log' i]",
+    "button[title*='delete log' i]",
+    "a[title*='delete log' i]"
+];
+
+for (const sel of explicitSelectors) {
+    const el = document.querySelector(sel);
+    if (tryClick(el)) return true;
 }
 
-return true;
+// Icon-only delete buttons often render as <use href="#delete">.
+const iconUse = document.querySelector("use[href='#delete'], use[*|href='#delete']");
+if (iconUse) {
+    const iconButton = iconUse.closest('button, a[role="button"], a, [role="button"]');
+    if (tryClick(iconButton)) return true;
+}
+
+// Last fallback: text matching for delete controls.
+const deleteLabels = ['delete log', 'delete this log'];
+const deleteCandidates = Array.from(document.querySelectorAll("button, a[role='button'], a"));
+for (const el of deleteCandidates) {
+    const text = normalize(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label') || el.getAttribute('title'));
+    if (!text) continue;
+    if (!deleteLabels.some((lbl) => text.includes(lbl))) continue;
+    if (tryClick(el)) return true;
+}
+return false;
 """
             )
         )
@@ -1678,37 +1745,88 @@ return true;
     if not clicked_delete:
         return False, "Delete Log button/link was not found on the log page."
 
+    confirmed = False
+
     # Accept native JS confirm() dialogs if they appear.
     try:
         WebDriverWait(driver, 2).until(EC.alert_is_present())
         driver.switch_to.alert.accept()
+        confirmed = True
     except Exception:
         pass
 
-    # Try clicking an in-page confirmation control when a modal is used.
+    # Click the in-page modal confirmation control when present.
+    if not confirmed:
+        try:
+            modal_delete_button = WebDriverWait(driver, 2.5).until(
+                EC.element_to_be_clickable(
+                    (
+                        By.CSS_SELECTOR,
+                        "button.delete-log-modal-delete, "
+                        "button[data-testid='delete-log-modal-delete']",
+                    )
+                )
+            )
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                modal_delete_button,
+            )
+            modal_delete_button.click()
+            confirmed = True
+        except Exception:
+            pass
+
+    # JS fallback for modal confirmation controls.
     try:
-        driver.execute_script(
-            r"""
+        if not confirmed:
+            confirmed = bool(
+                driver.execute_script(
+                    r"""
 const normalize = (v) => String(v || '').trim().toLowerCase();
+const tryClick = (el) => {
+    if (!el) return false;
+    if (el.disabled) return false;
+    try {
+        el.scrollIntoView({block: 'center'});
+        el.click();
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+const explicitModalSelectors = [
+    "button.delete-log-modal-delete",
+    "button[data-testid='delete-log-modal-delete']",
+    "[role='dialog'] button.delete-log-modal-delete",
+    ".modal button.delete-log-modal-delete"
+];
+for (const sel of explicitModalSelectors) {
+    const el = document.querySelector(sel);
+    if (tryClick(el)) return true;
+}
+
 const confirmLabels = ['delete', 'yes', 'confirm', 'remove'];
-const candidates = Array.from(document.querySelectorAll(
-  "[role='dialog'] button, [role='dialog'] a, [role='dialog'] input[type='button'], [role='dialog'] input[type='submit'], .modal button, .modal a, .modal input[type='button'], .modal input[type='submit']"
-));
+const candidates = Array.from(document.querySelectorAll("[role='dialog'] button, [role='dialog'] a, .modal button, .modal a"));
 for (const el of candidates) {
   const text = normalize(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
   if (!text) continue;
   if (!confirmLabels.some((lbl) => text.includes(lbl))) continue;
   if (text.includes('cancel') || text.includes('close')) continue;
-  if (el.disabled) continue;
-  el.scrollIntoView({block: 'center'});
-  el.click();
-  return true;
+    if (tryClick(el)) return true;
 }
 return false;
 """
-        )
+                )
+            )
     except Exception:
         pass
+
+    if not confirmed:
+        _log_message(
+            "CHECKER | Delete confirmation modal button not found; relying on reload verification.",
+            "warning",
+        )
 
     time.sleep(2.0)
 
@@ -1728,6 +1846,8 @@ return false;
         "doesn't exist",
         "does not exist",
         "not available",
+        "log was deleted",
+        "log deleted",
     ]
     unresolved_live_log = "/live/log/" in current_url
     has_not_found_marker = any(marker in page_text for marker in not_found_markers)
@@ -1735,6 +1855,9 @@ return false;
     if (not unresolved_live_log) or has_not_found_marker:
         _log_message(f"CHECKER | Deleted Write Note log for {cache_name}: {normalized_log_url}")
         return True, "Write Note log deleted."
+
+    if confirmed:
+        return True, "Delete was confirmed, but final reload verification was inconclusive."
 
     return False, "Delete was attempted but could not be verified."
 
@@ -2452,17 +2575,26 @@ def _scan_via_html(driver, update_status, update_progress):
                     results.append(row)
                     _write_in_progress_csv(results)
 
-                    update_status(
-                        f"Opening cache page for checker: {gc_code} {cache_name[:60]}..."
-                    )
-                    checker_url, checker_example_log, checker_status = _open_checker_for_cache(
-                        driver,
-                        cache_url,
-                        cache_name,
-                        update_status,
-                        log_url=geocaching_log_url,
-                        keep_checker_tab_open=(stop_after_matches > 0 and len(results) + 1 >= stop_after_matches),
-                    )
+                    checker_disabled = bool(getattr(driver, "_disable_challenge_checker", False))
+                    if checker_disabled:
+                        checker_url = ""
+                        checker_example_log = ""
+                        checker_status = "Checker skipped (disabled)"
+                        _log_message(
+                            f"HTML_SCAN | Checker disabled; skipping checker run for {gc_code} | {cache_name}"
+                        )
+                    else:
+                        update_status(
+                            f"Opening cache page for checker: {gc_code} {cache_name[:60]}..."
+                        )
+                        checker_url, checker_example_log, checker_status = _open_checker_for_cache(
+                            driver,
+                            cache_url,
+                            cache_name,
+                            update_status,
+                            log_url=geocaching_log_url,
+                            keep_checker_tab_open=(stop_after_matches > 0 and len(results) + 1 >= stop_after_matches),
+                        )
                     _log_message(
                         f"HTML_SCAN | Match | {gc_code} | {cache_name} | {date_text or 'no-date'}"
                     )
